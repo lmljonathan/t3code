@@ -25,14 +25,25 @@ const ApiAuth = Schema.Struct({ type: Schema.Literal("api"), key: Schema.String 
 const decodeAuthFile = Schema.decodeEffect(Schema.fromJsonString(AuthFile));
 const decodeApiAuth = Schema.decodeUnknownOption(ApiAuth);
 // OpenCode 2's database tags a stored key "key"; auth.json tags it "api".
-const StoredKey = Schema.Struct({
-  type: Schema.Literal("key"),
-  key: Schema.String,
-  metadata: Schema.optionalKey(
-    Schema.NullOr(Schema.Struct({ server: Schema.optionalKey(Schema.Unknown) })),
-  ),
-});
-const decodeStoredKey = Schema.decodeOption(Schema.fromJsonString(StoredKey));
+const ConsoleMetadata = Schema.NullOr(
+  Schema.Struct({
+    server: Schema.optionalKey(Schema.Unknown),
+    orgID: Schema.optionalKey(Schema.String),
+  }),
+);
+const StoredCredential = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("key"),
+    key: Schema.String,
+    metadata: Schema.optionalKey(ConsoleMetadata),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("oauth"),
+    access: Schema.String,
+    metadata: Schema.optionalKey(ConsoleMetadata),
+  }),
+]);
+const decodeStoredCredential = Schema.decodeOption(Schema.fromJsonString(StoredCredential));
 const UsageWindow = Schema.Struct({
   percent: Schema.Finite,
   resetsAt: Schema.DateTimeUtcFromString,
@@ -41,9 +52,9 @@ const UsageResponse = Schema.Struct({
   usage: Schema.Struct({ rolling: UsageWindow, weekly: UsageWindow, monthly: UsageWindow }),
 });
 
-// Select before decoding so an OAuth or self-hosted connection cannot fall
+// Select before decoding so an unsupported or self-hosted connection cannot fall
 // through to another stored account. NULL-active rows predate the selection flag.
-const readConsoleApiKey = (databasePath: string) =>
+const readConsoleCredential = (databasePath: string) =>
   Effect.try(() => {
     const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
     try {
@@ -57,7 +68,7 @@ const readConsoleApiKey = (databasePath: string) =>
         .get();
       const stored =
         typeof row?.value === "string"
-          ? Option.getOrUndefined(decodeStoredKey(row.value))
+          ? Option.getOrUndefined(decodeStoredCredential(row.value))
           : undefined;
       const server = stored?.metadata?.server;
       if (typeof server === "string") {
@@ -65,7 +76,11 @@ const readConsoleApiKey = (databasePath: string) =>
         if (`${url.origin}${url.pathname.replace(/\/+$/, "")}` !== "https://opencode.ai/console")
           return undefined;
       }
-      return stored?.key.trim();
+      if (!stored) return undefined;
+      if (stored.type === "key") return { key: stored.key.trim() };
+      // Console OAuth tokens are scoped to the selected workspace by this header.
+      const orgId = stored.metadata?.orgID?.trim();
+      return typeof server === "string" && orgId ? { key: stored.access.trim(), orgId } : undefined;
     } finally {
       database.close();
     }
@@ -108,24 +123,25 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     // Console supplies Go credentials in OpenCode 2. Inline auth explicitly
     // overrides local credentials, including the Console connection.
     const databaseFile = env.OPENCODE_DB ?? "opencode.db";
-    const consoleKey =
+    const consoleCredential =
       env.OPENCODE_AUTH_CONTENT || databaseFile === ":memory:"
         ? undefined
-        : yield* readConsoleApiKey(path.resolve(dataHome, "opencode", databaseFile));
-    let apiKey = consoleKey || goKey;
-    if (!apiKey) return unsupported;
+        : yield* readConsoleCredential(path.resolve(dataHome, "opencode", databaseFile));
+    let credential = consoleCredential ?? (goKey ? { key: goKey } : undefined);
+    if (!credential?.key) return unsupported;
 
     const client = yield* HttpClient.HttpClient;
-    const readUsage = (key: string) =>
+    const readUsage = (auth: { readonly key: string; readonly orgId?: string }) =>
       client.execute(
         HttpClientRequest.get("https://opencode.ai/zen/go/v1/usage").pipe(
-          HttpClientRequest.bearerToken(key),
+          HttpClientRequest.bearerToken(auth.key),
+          HttpClientRequest.setHeaders(auth.orgId ? { "x-org-id": auth.orgId } : {}),
         ),
       );
-    let response = yield* readUsage(apiKey);
-    if ((response.status === 401 || response.status === 403) && goKey && goKey !== apiKey) {
-      apiKey = goKey;
-      response = yield* readUsage(apiKey);
+    let response = yield* readUsage(credential);
+    if ((response.status === 401 || response.status === 403) && goKey && goKey !== credential.key) {
+      credential = { key: goKey };
+      response = yield* readUsage(credential);
     }
     // A valid Zen key can exist without a Go subscription.
     if (response.status === 403) return unsupported;
@@ -161,7 +177,7 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     // An unkeyed hash matches across environments without a shared secret. It
     // permits offline guesses, but Go keys are randomly generated.
     const credentialFingerprint = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(`opencode-go\0${apiKey}`))
+      .digest("SHA-256", new TextEncoder().encode(`opencode-go\0${credential.key}`))
       .pipe(Effect.map(Hex.encode), Effect.orDie);
     return {
       ...makeUsageLimits({ checkedAt, windows }),

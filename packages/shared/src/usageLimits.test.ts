@@ -6,9 +6,12 @@ import {
   UsageLimitSourceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
 
 import {
   type LimitAccount,
+  providerQuotaSummary,
+  earliestModelQuotaReset,
   collectProviderUsageLimits,
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -1288,5 +1291,199 @@ describe("ChatGPT sharing presentation", () => {
         auth: { status: "unauthenticated", subscriptionSharing: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe("composer quota reset countdown", () => {
+  it("shows remaining quota with a countdown that advances with the supplied clock", () => {
+    const limits = { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows: [window] };
+    const initial = providerQuotaSummary(limits, now);
+    expect(initial.label).toBe("Session 60%");
+    expect(initial.resetLabel).toBe("Resets: Session 2h 0m");
+    expect(providerQuotaSummary(limits, now + 30 * 60_000).resetLabel).toBe(
+      "Resets: Session 1h 30m",
+    );
+    expect(initial.detail).toContain("Session resets in 2h 0m.");
+  });
+
+  it("reports a passed reset as now without a negative duration", () => {
+    expect(
+      providerQuotaSummary(
+        { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows: [window] },
+        now + 3 * 60 * 60_000,
+      ).resetLabel,
+    ).toBe("Resets: Session now");
+  });
+
+  it("omits countdowns when the provider supplies no usable reset time", () => {
+    const { resetsAt: _reset, ...withoutReset } = window;
+    expect(
+      providerQuotaSummary(
+        { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows: [withoutReset] },
+        now,
+      ).resetLabel,
+    ).toBeUndefined();
+    expect(
+      providerQuotaSummary(
+        {
+          checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          windows: [{ ...window, resetsAt: "unknown" }],
+        },
+        now,
+      ).resetLabel,
+    ).toBeUndefined();
+  });
+});
+
+describe("Antigravity model quota presentation", () => {
+  it("selects the Gemini windows when both quota families are present", () => {
+    const limits = {
+      checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      windows: [
+        { ...window, id: "gemini-5h", label: "Gemini · 5-hour", usedPercent: 100 },
+        { ...window, id: "3p-5h", label: "Claude & GPT (shared) · 5-hour", usedPercent: 0 },
+      ],
+    };
+    const selected = providerQuotaSummary(limits, now, {
+      driver: ProviderDriverKind.make("antigravity"),
+      model: "gemini-3.8-flash-high",
+    });
+    expect(selected.label).toBe("Gemini · 5-hour 0%");
+    expect(selected.detail).not.toContain("Claude");
+  });
+
+  it("selects Gemini 4 Argon quota when selecting an Argon model", () => {
+    const limits = {
+      checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      windows: [
+        {
+          ...window,
+          id: "gemini-5h",
+          kind: "session" as const,
+          label: "Gemini · 5-hour",
+          usedPercent: 20,
+        },
+        {
+          ...window,
+          id: "gemini-weekly",
+          kind: "weekly" as const,
+          label: "Gemini · Weekly",
+          usedPercent: 30,
+        },
+        {
+          ...window,
+          id: "3p-5h",
+          kind: "session" as const,
+          label: "Claude & GPT (shared) · 5-hour",
+          usedPercent: 10,
+        },
+        {
+          ...window,
+          id: "gemini-argon-wtu-weekly",
+          kind: "weekly" as const,
+          label: "Gemini 4 Argon · Weekly",
+          usedPercent: 83,
+        },
+      ],
+    };
+    const argonSummary = providerQuotaSummary(limits, now, {
+      driver: ProviderDriverKind.make("antigravity"),
+      model: "gemini-4-argon-medium",
+    });
+    expect(argonSummary.label).toBe("Gemini 4 Argon · Weekly 17%");
+    expect(argonSummary.detail).toContain("Gemini 4 Argon · Weekly 17% left");
+    expect(argonSummary.detail).not.toContain("5-hour");
+
+    const flashSummary = providerQuotaSummary(limits, now, {
+      driver: ProviderDriverKind.make("antigravity"),
+      model: "gemini-3.8-flash-high",
+    });
+    expect(flashSummary.label).not.toContain("Argon");
+    expect(flashSummary.label).toContain("Gemini · 5-hour 80%");
+  });
+
+  it("falls back to pooled Gemini quota for Argon when separate Argon quota is not present", () => {
+    const limits = {
+      checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      windows: [
+        {
+          ...window,
+          id: "gemini-5h",
+          kind: "session" as const,
+          label: "Gemini · 5-hour",
+          usedPercent: 20,
+        },
+        {
+          ...window,
+          id: "gemini-weekly",
+          kind: "weekly" as const,
+          label: "Gemini · Weekly",
+          usedPercent: 30,
+        },
+      ],
+    };
+    const argonSummary = providerQuotaSummary(limits, now, {
+      driver: ProviderDriverKind.make("antigravity"),
+      model: "gemini-4-argon-medium",
+    });
+    expect(argonSummary.label).toContain("Gemini · 5-hour 80%");
+  });
+
+  it("does not show Claude/GPT quota as Gemini quota", () => {
+    const limits = {
+      checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      windows: [{ ...window, id: "3p-5h", label: "Claude & GPT (shared) · 5-hour" }],
+    };
+    const summary = providerQuotaSummary(limits, now, {
+      driver: ProviderDriverKind.make("antigravity"),
+      model: "gemini-3.8-flash-high",
+    });
+    expect(summary.label).toBe("Quota unavailable");
+    expect(summary.detail).not.toContain("60% left");
+    expect(
+      providerQuotaSummary(limits, now, {
+        driver: ProviderDriverKind.make("antigravity"),
+        model: "claude-sonnet-4-6",
+      }).label,
+    ).toContain("60%");
+  });
+
+  it("keeps account-wide OpenCode quotas for DeepSeek", () => {
+    const limits = { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows: [window] };
+    expect(
+      providerQuotaSummary(limits, now, {
+        driver: ProviderDriverKind.make("opencode"),
+        model: "opencode-go/deepseek-v4.1-flash",
+      }).label,
+    ).toBe("Session 60%");
+  });
+});
+
+describe("earliest model quota reset", () => {
+  const make = (id: string, at: string, weekly: number, driver = "codex") =>
+    provider({
+      instanceId: ProviderInstanceId.make(id),
+      displayName: id,
+      driver: ProviderDriverKind.make(driver),
+      models: [{ slug: "gpt-6.1-sol", name: "GPT 6.1 Sol", isCustom: false, capabilities: null }],
+      usageLimits: {
+        checkedAt: "2026-09-03T12:00:00.000Z",
+        windows: [
+          { ...window, resetsAt: at },
+          { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 100 - weekly },
+        ],
+      },
+    });
+  it("ignores OpenCode and zero-weekly accounts when choosing the earliest session reset", () => {
+    const providers = [
+      make("open", "2026-09-03T12:01:00Z", 100, "opencode"),
+      make("exhausted", "2026-09-03T12:02:00Z", 0),
+      make("later", "2026-09-03T15:00:00Z", 10),
+      make("soon", "2026-09-03T13:00:00Z", 1),
+    ];
+    expect(earliestModelQuotaReset(providers, "openai/gpt-6.1-sol", now)).toBe(
+      "Resets in 1h 0m · soon",
+    );
+    expect(earliestModelQuotaReset(providers.slice(0, 2), "gpt-6.1-sol", now)).toBeUndefined();
   });
 });

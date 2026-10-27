@@ -33,6 +33,8 @@ export function ComposerInlineControl(props: {
   readonly renderIcon?: (size: number) => ReactNode;
   readonly label: string;
   readonly suffix?: ReactNode;
+  readonly detail?: ReactNode;
+  readonly showSuffixWhenIconOnly?: boolean;
   /** Show only the icon and chevron; the label still names the control for accessibility. */
   readonly iconOnly?: boolean;
   readonly maxWidth?: ViewStyle["maxWidth"];
@@ -46,6 +48,21 @@ export function ComposerInlineControl(props: {
   // Keep the picker anchored to its parent while the editor changes height.
   const animatesLabel = props.iconOnly !== undefined;
   const iconSize = props.size === "large" ? 20 : smallIconSize;
+  const icon = props.renderIcon ? (
+    <View
+      className="shrink-0 items-center justify-center"
+      style={{ width: iconSize, height: iconSize }}
+    >
+      {props.renderIcon(iconSize)}
+    </View>
+  ) : props.icon ? (
+    <SymbolView
+      name={props.icon}
+      size={iconSize}
+      tintColorClassName={props.emphasized || props.selected ? "accent-icon" : "accent-icon-muted"}
+      type="monochrome"
+    />
+  ) : null;
   return (
     <Animated.View
       style={{
@@ -60,35 +77,23 @@ export function ComposerInlineControl(props: {
         accessibilityState={
           props.static ? undefined : { disabled: props.disabled, selected: props.selected }
         }
-        className="h-[44px] flex-row items-center gap-2 rounded-xl px-2 active:bg-subtle"
+        className={cn(
+          "flex-row items-center gap-2 rounded-xl px-2 active:bg-subtle",
+          props.detail ? "min-h-[60px] py-1" : "h-[44px]",
+        )}
         disabled={props.disabled || props.static}
         onPress={props.onPress}
         style={{ opacity: props.disabled ? 0.45 : 1 }}
       >
-        {props.renderIcon ? (
-          <View
-            className="size-4 shrink-0 items-center justify-center"
-            style={{ width: iconSize, height: iconSize }}
-          >
-            {props.renderIcon(iconSize)}
-          </View>
-        ) : props.icon ? (
-          <SymbolView
-            name={props.icon}
-            size={iconSize}
-            tintColorClassName={
-              props.emphasized || props.selected ? "accent-icon" : "accent-icon-muted"
-            }
-            type="monochrome"
-          />
-        ) : null}
+        {icon}
         {props.iconOnly ? null : (
           <Animated.View
-            className="shrink"
+            className="min-w-0 shrink items-start"
             entering={animatesLabel ? INLINE_CONTROL_LABEL_ENTERING : undefined}
           >
             <Text
               className={cn(
+                "min-w-0 shrink text-left",
                 props.size === "large" ? "text-base font-t3-medium" : "text-sm font-t3-medium",
                 props.emphasized || props.selected ? "text-foreground" : "text-foreground-muted",
               )}
@@ -96,9 +101,10 @@ export function ComposerInlineControl(props: {
             >
               {props.label}
             </Text>
+            {props.detail}
           </Animated.View>
         )}
-        {!props.iconOnly && props.suffix ? (
+        {(!props.iconOnly || props.showSuffixWhenIconOnly) && props.suffix ? (
           <View className="min-w-0 shrink">{props.suffix}</View>
         ) : null}
         {props.showChevron === false ? null : (

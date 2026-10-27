@@ -1231,7 +1231,7 @@ export function NewTaskDraftScreen(props: {
         canStopThread={false}
         queuedRunEdit={null}
         composerDraftKey={flow.draftKey}
-        followUpBehavior="queue"
+        followUpBehavior="steer"
         canSteerActiveTurn={false}
         isSavingQueuedEdit={false}
         onCancelQueuedRunEdit={() => {}}

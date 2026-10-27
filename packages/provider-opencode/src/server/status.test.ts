@@ -96,7 +96,7 @@ it.effect("reads Go limits with the instance's XDG credentials and preserves res
 );
 
 it.effect(
-  "uses the selected public Console key for Go limits, falling back only on auth rejection",
+  "uses the selected public Console credential for Go limits, falling back only on auth rejection",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -133,6 +133,17 @@ it.effect(
           consoleRow: { ...consoleKey, metadata: { server: "https://opencode.ai/console" } },
           requested: ["console-key"],
         },
+        {
+          consoleRow: {
+            type: "oauth",
+            methodID: "device",
+            access: "console-key",
+            refresh: "refresh-token",
+            expires: 0,
+            metadata: { server: "https://opencode.ai/console", orgID: "org_selected" },
+          },
+          requested: ["console-key"],
+        },
         { consoleStatus: 401, requested: ["console-key", "go-key"] },
         { consoleStatus: 403, requested: ["console-key", "go-key"] },
         { consoleStatus: 500, requested: ["console-key"] },
@@ -144,6 +155,22 @@ it.effect(
             access: "token",
             refresh: "refresh",
             expires: 0,
+          },
+          requested: ["go-key"],
+        },
+        {
+          consoleRow: {
+            type: "oauth",
+            access: "other-token",
+            metadata: { server: "https://console.example", orgID: "org_other" },
+          },
+          requested: ["go-key"],
+        },
+        {
+          consoleRow: {
+            type: "oauth",
+            access: "unscoped-token",
+            metadata: { server: "https://opencode.ai/console" },
           },
           requested: ["go-key"],
         },
@@ -196,6 +223,12 @@ it.effect(
               NodeAssert.equal(request.url, "https://opencode.ai/zen/go/v1/usage");
               const key = (request.headers.authorization ?? "").replace("Bearer ", "");
               authorizations.push(key);
+              NodeAssert.equal(
+                request.headers["x-org-id"],
+                consoleRow.type === "oauth" && "metadata" in consoleRow && key === "console-key"
+                  ? "org_selected"
+                  : undefined,
+              );
               // The legacy key is expired in the regression; it only works in fallback scenarios.
               const status =
                 key === "console-key" ? consoleStatus : requested.includes(key) ? 200 : 401;

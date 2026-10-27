@@ -82,15 +82,15 @@ function quotaWindow(
   kind: ServerProviderUsageWindow["kind"] = "other",
   windowDurationMins?: number,
 ): ServerProviderUsageWindow | undefined {
-  if (quota.remainingFraction === undefined || !Number.isFinite(quota.remainingFraction)) {
-    return undefined;
-  }
   const resetsAt = iso(quota.resetTime);
+  // Protobuf JSON omits scalar zeroes: an exhausted quota can contain only its reset time.
+  const remaining = quota.remainingFraction ?? (resetsAt ? 0 : undefined);
+  if (remaining === undefined || !Number.isFinite(remaining)) return undefined;
   return {
     id,
     label,
     kind,
-    usedPercent: (1 - Math.max(0, Math.min(1, quota.remainingFraction))) * 100,
+    usedPercent: (1 - Math.max(0, Math.min(1, remaining))) * 100,
     ...(resetsAt ? { resetsAt } : {}),
     ...(windowDurationMins === undefined ? {} : { windowDurationMins }),
   };
@@ -104,15 +104,25 @@ function summaryWindows(summary: typeof Summary.Type) {
   for (const group of groups ?? []) {
     for (const bucket of group.buckets ?? []) {
       if (bucket.disabled) continue;
-      const family = bucket.bucketId.startsWith("gemini-")
-        ? "Gemini"
-        : bucket.bucketId.startsWith("3p-")
-          ? "Claude & GPT (shared)"
-          : group.displayName?.trim() || bucket.bucketId;
+      const isArgon =
+        bucket.bucketId.includes("argon") || group.displayName?.toLowerCase().includes("argon");
+      const family = isArgon
+        ? group.displayName?.trim() || "Gemini 4 Argon"
+        : bucket.bucketId.startsWith("gemini-")
+          ? "Gemini"
+          : bucket.bucketId.startsWith("3p-")
+            ? "Claude & GPT (shared)"
+            : group.displayName?.trim() || bucket.bucketId;
       const weekly = bucket.window === "weekly";
       const session = bucket.window === "5h";
+      // Argon ids must not start with "gemini-": older clients select a
+      // model's windows by id prefix, and an exhausted Argon bucket would
+      // otherwise be attributed to every pooled Gemini model.
+      const windowId = isArgon
+        ? `argon-${weekly ? "weekly" : session ? "5h" : bucket.bucketId.replace(/^gemini-/, "")}`
+        : bucket.bucketId;
       const window = quotaWindow(
-        bucket.bucketId,
+        windowId,
         `${family} · ${weekly ? "Weekly" : session ? "5-hour" : bucket.displayName?.trim() || "Quota"}`,
         bucket,
         weekly ? "weekly" : session ? "session" : "other",
@@ -128,8 +138,10 @@ function summaryWindows(summary: typeof Summary.Type) {
 function modelWindows(models: typeof Models.Type) {
   const windows = new Map<string, ServerProviderUsageWindow>();
   for (const [modelId, model] of Object.entries(models.models)) {
-    const family =
-      model.modelProvider === "MODEL_PROVIDER_GOOGLE" || modelId.startsWith("gemini-")
+    const isArgon = modelId.includes("argon");
+    const family = isArgon
+      ? "Gemini 4 Argon"
+      : model.modelProvider === "MODEL_PROVIDER_GOOGLE" || modelId.startsWith("gemini-")
         ? "Gemini"
         : model.modelProvider === "MODEL_PROVIDER_ANTHROPIC" || modelId.startsWith("claude-")
           ? "Claude"
@@ -143,7 +155,7 @@ function modelWindows(models: typeof Models.Type) {
     ] as const) {
       if (!quota) continue;
       const window = quotaWindow(
-        `${family.toLowerCase()}-${suffix}`,
+        isArgon ? `argon-${suffix}` : `${family.toLowerCase()}-${suffix}`,
         `${family} · ${suffix === "weekly" ? "Weekly" : "Reported quota"}`,
         quota,
         suffix === "weekly" ? "weekly" : "other",
@@ -260,7 +272,7 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
             HttpClientRequest.post(`${endpoint}/v1internal:${operation}`).pipe(
               HttpClientRequest.setHeaders({
                 Authorization: `Bearer ${accessToken}`,
-                "User-Agent": `antigravity/hub/1.0.0 (aidev_client; os_type=${platform}; arch=${architecture}; cl=963137146)`,
+                "User-Agent": `antigravity/hub/2.26.0 (aidev_client; os_type=${platform}; arch=${architecture}; cl=963137146)`,
               }),
               HttpClientRequest.bodyJsonUnsafe(
                 token.project_id ? { project: token.project_id } : {},
@@ -282,11 +294,29 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     const summary = yield* fetchWindows("retrieveUserQuotaSummary", (response) =>
       decodeSummary(response).pipe(Effect.map(summaryWindows)),
     );
-    const windows = summary.length
-      ? summary
-      : yield* fetchWindows("fetchAvailableModels", (response) =>
+    const coveredFamilies = new Set(
+      summary.flatMap((window) =>
+        window.id.startsWith("3p-")
+          ? ["claude", "gpt"]
+          : window.id.includes("argon")
+            ? ["gemini", "argon"]
+            : [window.id.split("-")[0]!],
+      ),
+    );
+    // A successful summary can omit Gemini entirely. The model endpoint still
+    // reports that quota; use it only for families absent from the summary.
+    const missing = ["gemini", "claude", "gpt"].some((family) => !coveredFamilies.has(family))
+      ? yield* fetchWindows("fetchAvailableModels", (response) =>
           decodeModels(response).pipe(Effect.map(modelWindows)),
-        );
+        )
+      : [];
+    const windows = [
+      ...summary,
+      ...missing.filter(
+        (window) =>
+          !coveredFamilies.has(window.id.includes("argon") ? "argon" : window.id.split("-")[0]!),
+      ),
+    ];
     if (windows.length === 0) {
       return makeUnavailableUsageLimits({
         checkedAt,

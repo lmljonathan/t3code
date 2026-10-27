@@ -296,11 +296,18 @@ export function NewTaskFlowProvider(
   const [branchQuery, setBranchQuery] = useState("");
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [editingPendingTask, setEditingPendingTask] = useState<QueuedThreadMessage | null>(null);
+  const [, setQuotaClock] = useState(Date.now);
   const pendingLocalBranchSyncDraftKeysRef = useRef(new Set<string>());
   // Mirrors `editingPendingTask` synchronously so the unmount flush cannot act
   // on a task whose editing session already ended this render.
   const editingPendingTaskRef = useRef<QueuedThreadMessage | null>(null);
   const editingRevisionRef = useRef(Promise.resolve(0));
+
+  useEffect(() => {
+    if (props.active === false) return;
+    const interval = setInterval(() => setQuotaClock(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, [props.active]);
 
   const reset = useCallback(() => {
     setSelectedEnvironmentId(null);
@@ -587,6 +594,8 @@ export function NewTaskFlowProvider(
     draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
     undefined,
     selectedProject?.id ?? null,
+    false,
+    true,
   );
 
   const selectedModel = resolveNewTaskModelSelection({

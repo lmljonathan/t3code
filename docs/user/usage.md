@@ -49,6 +49,26 @@ saved totals first, then updates them when Cursor's API responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+## Choose models by usage
+
+On mobile, open thread settings and switch from **Providers** to **Models**. On desktop
+and web, open the composer's model picker and choose **Models**, the first entry in the
+provider rail; the composer's picker opens on it. Either way, each exact model ID is listed once, ordered by reported token
+use over the past 30 days on the selected environment. When usage is unavailable, models
+appear alphabetically. On mobile, the last ranking is remembered per environment, so the list opens in
+order and keeps it while the sheet is open; pull to refresh to apply newer usage. On desktop and web,
+hover a model's quota label to see every account offering it and its remaining quota.
+
+Tap the star on a model to favorite it. Favorites are listed first, then the rest by usage. A model counts as a favorite when any account offering it is one, and the star sets all of them together.
+
+Selecting a model chooses the eligible account with the most remaining session
+quota and positive weekly quota. Quota must have been reported within five minutes;
+accounts with missing quota are excluded. The choice is checked again when you save or
+pick, keeping your selected options on a compatible account. If no account qualifies, use
+**Providers** to choose one manually. Provider filters, project restrictions and a
+thread's locked provider still apply. Pickers in settings, and the multi-model send picker,
+do not offer **Models** because they need a specific account.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,

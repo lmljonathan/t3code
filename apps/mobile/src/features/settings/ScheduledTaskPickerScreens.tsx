@@ -1,6 +1,6 @@
 import { useNavigation } from "@react-navigation/native";
 import * as Haptics from "expo-haptics";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { buildModelOptions, groupByProvider } from "../../lib/modelOptions";
@@ -21,6 +21,11 @@ function MissingTaskDraft() {
 }
 
 export function ScheduledTaskModelPickerRouteScreen() {
+  const [quotaClock, setQuotaClock] = useState(Date.now);
+  useEffect(() => {
+    const interval = setInterval(() => setQuotaClock(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
   const navigation = useNavigation();
   const { editor, setEditor } = useScheduledTaskEditor();
   const config = useEnvironmentServerConfig(editor?.environmentId ?? null);
@@ -28,7 +33,7 @@ export function ScheduledTaskModelPickerRouteScreen() {
   const projectId = editor?.draft.projectId ?? null;
   const models = useMemo(
     () => buildModelOptions(config, selectedModel, undefined, projectId),
-    [config, selectedModel, projectId],
+    [config, selectedModel, projectId, quotaClock],
   );
   const providerGroups = useMemo(() => groupByProvider(models), [models]);
   const selectedOption = models.find(

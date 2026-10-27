@@ -41,10 +41,13 @@ function WorkspaceRootTitle(props: {
 }) {
   const { state } = useWorkspaceTabs()!;
   return (
-    <View style={{ width: props.maxWidth, minHeight: 32, justifyContent: "center" }}>
+    <View
+      pointerEvents="box-none"
+      style={{ width: props.maxWidth, minHeight: 32, justifyContent: "center" }}
+    >
       <WorkspaceConnectionTitle
         brand={
-          <CompactBrandTitle accessibilityLabel={`T3 Code, ${TAB_TITLES[state.selectedTab]}`} />
+          <CompactBrandTitle fit accessibilityLabel={`T3 Code, ${TAB_TITLES[state.selectedTab]}`} />
         }
         maxWidth={props.maxWidth}
         onPress={props.onOpenEnvironments}
@@ -75,10 +78,12 @@ function WorkspaceRootContent() {
   const keyboardHeight = useKeyboardState((keyboard) => keyboard.height);
   const workspace = useWorkspaceTabs()!;
   const { state } = workspace;
+  // UIKit centers the title, so reserve the trailing buttons' width on both sides.
+  const headerActionsWidth = (isDuoDevice(deviceType) ? 2 : 3) * 44 + 16;
   const renderHeaderTitle = useCallback(
     () => (
       <WorkspaceRootTitle
-        maxWidth={Math.max(0, width - 160)}
+        maxWidth={Math.max(0, width - (Platform.OS === "ios" ? 2 * headerActionsWidth : 160))}
         onOpenEnvironments={() =>
           navigation.navigate("SettingsSheet", {
             screen: "SettingsContent",
@@ -87,7 +92,7 @@ function WorkspaceRootContent() {
         }
       />
     ),
-    [width, navigation],
+    [width, headerActionsWidth, navigation],
   );
   const tab = state.tabs[state.selectedTab];
   const bottomClearance =

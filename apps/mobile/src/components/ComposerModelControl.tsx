@@ -1,3 +1,4 @@
+import { View } from "react-native";
 import type { ModelSelection, ProviderDriverKind } from "@t3tools/contracts";
 import {
   buildTraitsTriggerDisplay,
@@ -19,6 +20,8 @@ export function ComposerModelControl(props: {
   readonly disabled?: boolean;
   readonly size?: "regular" | "large";
   readonly iconOnly?: boolean;
+  readonly quotaResetLabel?: string | null;
+  readonly fallbackLabel?: string | null;
   readonly onPress: () => void;
 }) {
   const descriptors = resolveProviderOptionDescriptors({
@@ -38,13 +41,19 @@ export function ComposerModelControl(props: {
     : "";
   const badge = props.modelOption?.providerBadge;
   const label = props.modelOption?.label ?? props.selection?.model ?? "Choose model";
+  const quota = props.modelOption?.quotaSummary;
+  const resetLabel =
+    props.quotaResetLabel === undefined ? quota?.resetLabel : props.quotaResetLabel;
+  const fallbackLabel = props.fallbackLabel;
   return (
     <ComposerInlineControl
       accessibilityLabel={[
         "Model and reasoning settings",
         label,
         badge?.showBadge ? badge.displayName : null,
+        quota?.detail,
         summary,
+        fallbackLabel,
       ]
         .filter(Boolean)
         .join(", ")}
@@ -70,19 +79,47 @@ export function ComposerModelControl(props: {
           />
         )
       }
-      label={label}
+      label={summary ? `${label} · ${summary}` : label}
       iconOnly={props.iconOnly}
+      showSuffixWhenIconOnly={Boolean(quota || fallbackLabel)}
+      detail={
+        quota || resetLabel || fallbackLabel ? (
+          <View className="items-start">
+            {quota ? (
+              <Text
+                className="text-2xs font-t3-medium text-foreground text-left"
+                style={{ fontVariant: ["tabular-nums"] }}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.85}
+                accessibilityLabel={quota.detail}
+              >
+                {quota.label}
+              </Text>
+            ) : null}
+            {resetLabel || fallbackLabel ? (
+              <Text
+                className="text-2xs text-foreground-muted text-left"
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.85}
+              >
+                {resetLabel ? resetLabel : null}
+                {resetLabel && fallbackLabel ? " · " : null}
+                {fallbackLabel ? (
+                  <Text className="text-yellow-400 font-t3-medium" style={{ color: "#facc15" }}>
+                    {fallbackLabel}
+                  </Text>
+                ) : null}
+              </Text>
+            ) : null}
+          </View>
+        ) : undefined
+      }
       suffix={
-        summary ? (
-          <Text
-            className={
-              props.size === "large"
-                ? "text-sm text-foreground-muted"
-                : "text-xs text-foreground-muted"
-            }
-            numberOfLines={1}
-          >
-            {summary}
+        props.iconOnly && (quota || fallbackLabel) ? (
+          <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+            {quota?.label ?? fallbackLabel}
           </Text>
         ) : undefined
       }

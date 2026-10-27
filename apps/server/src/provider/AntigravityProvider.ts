@@ -7,6 +7,7 @@ import {
   type ServerProviderModel,
   type ServerProviderSlashCommand,
   type ServerProviderUsageLimits,
+  type OrchestrationV2ProviderFailure,
 } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
@@ -164,8 +165,72 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
   // rewrite the workspace entry with native commands and must keep these, or
   // the registry drops the suggestions and never re-reads the workspace.
   const discoveredSkills = new Map<string, ServerProvider["skills"]>();
+  const deniedQuotas = new Map<string, { resetAt: string; observedAt: string }>();
+  const applyDeniedQuotas = (draft: ServerProviderDraft, now: number): ServerProviderDraft => {
+    let windows = [...(draft.usageLimits?.windows ?? [])];
+    for (const [family, denial] of deniedQuotas) {
+      if (DateTime.toEpochMillis(DateTime.makeUnsafe(denial.resetAt)) <= now) {
+        deniedQuotas.delete(family);
+        continue;
+      }
+      windows = windows.filter((window) =>
+        family === "3p"
+          ? !/^(3p|claude|gpt)-/.test(window.id)
+          : !window.id.startsWith(`${family}-`),
+      );
+      windows.push({
+        id: `${family}-denied`,
+        label: `${family === "gemini" ? "Gemini" : "Claude & GPT (shared)"} · Limit reached`,
+        kind: "other",
+        usedPercent: 100,
+        resetsAt: denial.resetAt,
+      });
+    }
+    return windows.length === 0 || deniedQuotas.size === 0
+      ? draft
+      : {
+          ...draft,
+          usageLimits: {
+            ...draft.usageLimits,
+            checkedAt: draft.usageLimits?.checkedAt ?? [...deniedQuotas.values()][0]!.observedAt,
+            windows,
+            unavailable: undefined,
+          },
+        };
+  };
+  const onTurnSettled = Effect.fn("AntigravityProvider.onTurnSettled")(function* (input: {
+    readonly modelSelection: { readonly model: string };
+    readonly status: "completed" | "interrupted" | "failed" | "cancelled";
+    readonly failure?: OrchestrationV2ProviderFailure;
+  }) {
+    const family = input.modelSelection.model.startsWith("gemini-")
+      ? "gemini"
+      : /^(claude|gpt)-/.test(input.modelSelection.model)
+        ? "3p"
+        : undefined;
+    if (!family) return;
+    if (
+      input.status === "failed" &&
+      input.failure?.class === "usage_limit" &&
+      input.failure.resetAt
+    ) {
+      deniedQuotas.set(family, {
+        resetAt: input.failure.resetAt,
+        observedAt: DateTime.formatIso(yield* DateTime.now),
+      });
+    } else if (input.status === "completed") {
+      deniedQuotas.delete(family);
+    } else return;
+    yield* SubscriptionRef.update(metadata, (state) => ({ ...state }));
+  });
   const getSnapshot = SubscriptionRef.get(metadata).pipe(
-    Effect.flatMap((state) => options.stampIdentity(state.draft)),
+    Effect.flatMap((state) =>
+      DateTime.now.pipe(
+        Effect.flatMap((now) =>
+          options.stampIdentity(applyDeniedQuotas(state.draft, DateTime.toEpochMillis(now))),
+        ),
+      ),
+    ),
   );
 
   const checkProvider = Effect.fn("checkAntigravityProvider")(function* () {
@@ -241,7 +306,9 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         },
       } satisfies AntigravityProviderState;
     });
-    return yield* options.stampIdentity(next.draft);
+    return yield* options.stampIdentity(
+      applyDeniedQuotas(next.draft, DateTime.toEpochMillis(DateTime.makeUnsafe(updatedAt))),
+    );
   });
 
   const maintenanceCapabilities =
@@ -260,7 +327,12 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     enrichSnapshot: ({ publishSnapshot }) =>
       SubscriptionRef.changes(metadata).pipe(
         Stream.runForEach((state) =>
-          options.stampIdentity(state.draft).pipe(Effect.flatMap(publishSnapshot)),
+          DateTime.now.pipe(
+            Effect.flatMap((now) =>
+              options.stampIdentity(applyDeniedQuotas(state.draft, DateTime.toEpochMillis(now))),
+            ),
+            Effect.flatMap(publishSnapshot),
+          ),
         ),
       ),
   });
@@ -371,6 +443,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
 
   const clearAccountMetadata = Effect.fn("AntigravityProvider.clearAccountMetadata")(function* () {
     if (options.clearUsage) yield* options.clearUsage;
+    deniedQuotas.clear();
     if (!settings.enabled) return;
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
     yield* SubscriptionRef.update(
@@ -427,6 +500,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
   return {
     snapshot: { ...managed, getSnapshot },
     onSessionStarted,
+    onTurnSettled,
     onConfigOptionsUpdated,
     onAvailableCommands,
     onSignedOut: clearAccountMetadata(),

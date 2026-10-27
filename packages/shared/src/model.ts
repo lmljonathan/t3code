@@ -525,3 +525,12 @@ export function applyClaudePromptEffortPrefix(
   }
   return `Ultrathink:\n${trimmed}`;
 }
+
+/** Compare a model across harnesses without changing the provider-owned wire ID. */
+export function comparableModelName(model: string): string {
+  return model
+    .split("/")
+    .at(-1)!
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}

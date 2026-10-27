@@ -225,6 +225,15 @@ class AcpModelSelectionError extends Schema.TaggedError<AcpModelSelectionError>(
 
 export interface AcpAdapterV2Flavor {
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
+  readonly assistantMessageFailure?: (
+    text: string,
+    observedAt: DateTime.Utc,
+  ) => OrchestrationV2ProviderFailure | undefined;
+  readonly onTurnSettled?: (input: {
+    readonly modelSelection: ModelSelection;
+    readonly status: "completed" | "interrupted" | "failed" | "cancelled";
+    readonly failure?: OrchestrationV2ProviderFailure;
+  }) => Effect.Effect<void>;
   readonly driver: ProviderDriverKind;
   readonly capabilities: OrchestrationV2ProviderCapabilities;
   readonly clientCapabilitiesMeta?: NonNullable<
@@ -6954,9 +6963,26 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           failure?: OrchestrationV2ProviderFailure,
         ): Effect.fn.Return<void> {
           if (context.finalized) return;
-          const settledStatus = context.interrupted ? "interrupted" : status;
+          const now = yield* DateTime.now;
+          const terminalFailure =
+            failure ??
+            (status === "completed"
+              ? flavor.assistantMessageFailure?.(context.assistant.current?.text ?? "", now)
+              : undefined);
+          const settledStatus = context.interrupted
+            ? "interrupted"
+            : terminalFailure
+              ? "failed"
+              : status;
           context.finalizedStatus = settledStatus;
           context.finalized = true;
+          yield* (
+            flavor.onTurnSettled?.({
+              modelSelection: context.input.modelSelection,
+              status: settledStatus,
+              ...(terminalFailure ? { failure: terminalFailure } : {}),
+            }) ?? Effect.void
+          );
           const directStopQuarantine = yield* Ref.get(stoppedRunQuarantine);
           if (flavor.subagentsIdleOnTurnCompletion === true) {
             for (const subagent of context.subagents.values()) {
@@ -6983,7 +7009,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (settledStatus !== "failed") {
             yield* emitProviderRetry(context, settledStatus);
           }
-          const now = yield* DateTime.now;
           if (
             flavor.supportsCompaction === true &&
             context.input.message.text.trim() === "/compact" &&
@@ -7069,7 +7094,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   hasWorkingDescendant(rootSessionId)
                     ? { childTurnsContinue: true }
                     : {}),
-                  failure: failure ?? makeProviderFailure({ class: "provider_error" }),
+                  failure: terminalFailure ?? makeProviderFailure({ class: "provider_error" }),
                   ...(context.providerRetry === undefined
                     ? {}
                     : {

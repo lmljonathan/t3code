@@ -28,6 +28,7 @@ import {
 import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts";
 import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
+import { applyAntigravityModelCatalog } from "../antigravityModelCatalog.ts";
 import {
   antigravityAuthConfigIssue,
   antigravityAuthLabel,
@@ -166,7 +167,7 @@ export const AntigravityDriver: ProviderDriver<
     });
     const classifyModels = (draft: ServerProviderDraft) =>
       currentCatalog.pipe(
-        Effect.map((catalog) => stampIdentity(ModelCatalog.applyModelCatalog(draft, catalog))),
+        Effect.map((catalog) => stampIdentity(applyAntigravityModelCatalog(draft, catalog))),
       );
 
     const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
@@ -419,6 +420,7 @@ export const AntigravityDriver: ProviderDriver<
       withProcess: authFlow.withProcess,
       defaultModel,
       onSessionStarted: provider.onSessionStarted,
+      onTurnSettled: provider.onTurnSettled,
       onSessionEvent: (event) => {
         if (event._tag === "ConfigOptionsUpdated") {
           return provider.onConfigOptionsUpdated(event.configOptions);

@@ -653,13 +653,32 @@ function TaskForm({
   readonly onSaved: () => void;
   readonly onChangeEnvironment: (target: SettingsTarget) => void;
 }) {
+  const [, setQuotaClock] = useState(Date.now);
   const navigation = useNavigation<NativeStackNavigationProp<ScheduledTaskRoutes>>();
+  useEffect(() => {
+    const interval = setInterval(() => setQuotaClock(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
   const tasks = useEnvironmentQuery(
     serverEnvironment.scheduledTasksLive({ environmentId, input: {} }),
   );
   const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const config = useEnvironmentServerConfig(environmentId);
-  const modelOptions = buildModelOptions(config, null, undefined, draft.projectId);
+  const modelOptions = buildModelOptions(
+    config,
+    draft.modelSelection,
+    undefined,
+    draft.projectId,
+    true,
+  );
+  const selectedModelOption = modelOptions.find(
+    (option) =>
+      option.selection.instanceId === draft.modelSelection?.instanceId &&
+      option.selection.model === draft.modelSelection?.model,
+  );
+  const selectedModelLabel = selectedModelOption
+    ? `${selectedModelOption.label} · ${selectedModelOption.quotaSummary?.label ?? "Quota unavailable"}`
+    : undefined;
   const canOperate = useAtomValue(
     serverEnvironment.upsertScheduledTask.permissionAtom(environmentId),
   );
@@ -872,11 +891,7 @@ function TaskForm({
             label="Model"
             borderTop
             value={
-              modelOptions.find(
-                (option) =>
-                  option.selection.instanceId === draft.modelSelection?.instanceId &&
-                  option.selection.model === draft.modelSelection?.model,
-              )?.label ??
+              selectedModelLabel ??
               draft.modelSelection?.model ??
               (modelOptions.length ? "Choose model" : "No models available")
             }

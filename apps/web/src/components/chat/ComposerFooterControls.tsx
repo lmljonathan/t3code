@@ -292,6 +292,7 @@ export function ComposerModelPicker({
   return (
     <ProviderModelPicker
       {...pickerProps}
+      modelOnlyView={!multipleModelsEnabled}
       {...(multipleModelsEnabled
         ? {
             ...(multipleModelSelections !== null

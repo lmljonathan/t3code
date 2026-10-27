@@ -12,10 +12,12 @@ import {
 } from "@t3tools/contracts";
 
 import * as DateTime from "effect/DateTime";
+import { comparableModelName } from "./model.ts";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const QUOTA_STALE_AFTER = 5 * MINUTE;
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
 export const CHATGPT_USAGE_LIMIT_CODE = "subscription_sharing_usage_limit_exceeded";
@@ -535,6 +537,166 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
 
 export function remainingPercent(window: ServerProviderUsageWindow): number {
   return Math.round(100 - Math.max(0, Math.min(100, window.usedPercent)));
+}
+
+export interface ProviderQuotaSummary {
+  readonly label: string;
+  readonly detail: string;
+  readonly resetLabel?: string;
+}
+
+/**
+ * Compact, account-scoped quota for model selectors. These windows belong to a
+ * provider instance; they are not model-specific unless the provider says so.
+ */
+export function modelUsageWindows(
+  limits: ServerProviderUsageLimits | undefined,
+  selection: { readonly driver: ServerProvider["driver"]; readonly model: string },
+): ReadonlyArray<ServerProviderUsageWindow> {
+  if (!limits) return [];
+  if (selection.driver !== "antigravity") return limits.windows;
+  const isArgon = selection.model.includes("argon");
+  if (isArgon) {
+    const argonWindows = limits.windows.filter((window) => window.id.includes("argon"));
+    if (argonWindows.length > 0) return argonWindows;
+  }
+  const family = selection.model.startsWith("gemini-")
+    ? "gemini"
+    : selection.model.startsWith("claude-")
+      ? "claude"
+      : selection.model.startsWith("gpt-")
+        ? "gpt"
+        : undefined;
+  return limits.windows.filter(
+    (window) =>
+      family !== undefined &&
+      !window.id.includes("argon") &&
+      (window.id.startsWith(`${family}-`) || (family !== "gemini" && window.id.startsWith("3p-"))),
+  );
+}
+
+export function providerQuotaSummary(
+  limits: ServerProviderUsageLimits | undefined,
+  now = DateTime.toEpochMillis(DateTime.nowUnsafe()),
+  selection?: { readonly driver: ServerProvider["driver"]; readonly model: string },
+): ProviderQuotaSummary {
+  if (limits && selection?.driver === "antigravity") {
+    return quotaSummary({ ...limits, windows: [...modelUsageWindows(limits, selection)] }, now);
+  }
+  return quotaSummary(limits, now);
+}
+
+export function earliestModelQuotaReset(
+  providers: ReadonlyArray<ServerProvider>,
+  model: string,
+  now: number,
+): string | undefined {
+  let earliest: { at: number; provider: string } | undefined;
+  for (const provider of providers) {
+    if (
+      provider.driver === "opencode" ||
+      !provider.enabled ||
+      !provider.installed ||
+      provider.status === "error" ||
+      provider.status === "disabled" ||
+      provider.auth.status === "unauthenticated" ||
+      provider.usageLimits?.unavailable ||
+      !provider.usageLimits ||
+      !provider.models.some(
+        (entry) => comparableModelName(entry.slug) === comparableModelName(model),
+      )
+    )
+      continue;
+    const checkedAt = Date.parse(provider.usageLimits.checkedAt);
+    if (!Number.isFinite(checkedAt) || now - checkedAt > QUOTA_STALE_AFTER) continue;
+    const windows = modelUsageWindows(provider.usageLimits, { driver: provider.driver, model });
+    const weeks = windows.filter((window) => window.kind === "weekly");
+    if (weeks.some((window) => remainingPercent(window) <= 0)) continue;
+    if (!weeks.length && !windows.some((window) => window.id.endsWith("-quota"))) continue;
+    for (const window of windows) {
+      if (window.kind !== "session" && window.kind !== "other") continue;
+      const at = resetMillis(window);
+      if (at === null || at <= now || (earliest && at >= earliest.at)) continue;
+      earliest = { at, provider: provider.displayName ?? provider.instanceId };
+    }
+  }
+  return earliest
+    ? `Resets in ${formatDuration(earliest.at - now)} · ${earliest.provider}`
+    : undefined;
+}
+
+function quotaSummary(
+  limits: ServerProviderUsageLimits | undefined,
+  now: number,
+): ProviderQuotaSummary {
+  if (
+    !limits ||
+    (limits.windows.length === 0 && limits.resetCredits === undefined) ||
+    limits.unavailable?.reason === "unsupported"
+  ) {
+    const reason = limits ? limitsNotice(limits) : null;
+    return {
+      label: "Quota unavailable",
+      detail: [
+        reason ?? "This provider has not reported numeric quota.",
+        limits?.checkedAt
+          ? `Last checked ${DateTime.toDateUtc(DateTime.makeUnsafe(limits.checkedAt)).toLocaleString()}.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  }
+
+  const candidates = [...limits.windows].sort(
+    (left, right) => remainingPercent(left) - remainingPercent(right),
+  );
+  const selected = [
+    candidates.find((window) => window.kind === "session"),
+    candidates.find((window) => window.kind === "weekly" || window.kind === "monthly"),
+    candidates.find((window) => window.kind === "other"),
+  ].filter((window): window is ServerProviderUsageWindow => window !== undefined);
+  const windows = [...new Map(selected.map((window) => [window.id, window])).values()].slice(0, 2);
+  const checkedAt = Date.parse(limits.checkedAt);
+  const stale =
+    !Number.isFinite(checkedAt) ||
+    now - checkedAt > QUOTA_STALE_AFTER ||
+    limits.unavailable?.reason === "probeFailed";
+  const label = [
+    ...windows.map((window) => `${window.label} ${remainingPercent(window)}%`),
+    ...(limits.resetCredits && (limits.resetCredits.availableCount > 0 || windows.length === 0)
+      ? [`${limits.resetCredits.availableCount} reset credits`]
+      : []),
+    ...(stale ? ["Stale"] : []),
+  ].join(" · ");
+  const resets = windows.flatMap((window) => {
+    const at = resetMillis(window);
+    if (at === null) return [];
+    return [`${window.label} ${at <= now ? "now" : formatDuration(at - now)}`];
+  });
+  return {
+    label,
+    ...(resets.length > 0 ? { resetLabel: `Resets: ${resets.join(" · ")}` } : {}),
+    detail: [
+      "This quota belongs to the selected provider account.",
+      `Remaining: ${windows
+        .map((window) => `${window.label} ${remainingPercent(window)}% left`)
+        .join(" · ")}.`,
+      ...windows.flatMap((window) => {
+        const reset = formatResetsIn(window, now);
+        return reset ? [`${window.label} ${reset}.`] : [];
+      }),
+      limits.resetCredits ? `${limits.resetCredits.availableCount} reset credits available.` : null,
+      `Last checked ${DateTime.toDateUtc(DateTime.makeUnsafe(limits.checkedAt)).toLocaleString()}.`,
+      stale
+        ? limits.unavailable?.reason === "probeFailed"
+          ? `The latest quota check failed${limits.unavailable.message ? `: ${limits.unavailable.message}` : "; showing the last reported value"}.`
+          : "This quota snapshot is stale."
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
 }
 
 function resetMillis(window: ServerProviderUsageWindow): number | null {

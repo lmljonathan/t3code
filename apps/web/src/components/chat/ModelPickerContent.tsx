@@ -7,6 +7,9 @@ import {
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
+import { favoritesFirstBy } from "@t3tools/shared/modelOnlyCatalog";
+import { makeWindow } from "@t3tools/shared/usageFormat";
+import { providerQuotaSummary } from "@t3tools/shared/usageLimits";
 import { useAtomValue } from "@effect/atom-react";
 import { formatProviderUpdateRequiredNotice } from "@t3tools/client-runtime/providerUpdateRequiredModels";
 import { useNavigate } from "@tanstack/react-router";
@@ -24,6 +27,11 @@ import {
 import { ChevronRightIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
 import { ModelPickerSidebar } from "./ModelPickerSidebar";
+import {
+  buildModelOnlyPickerEntries,
+  selectModelOnlyAccount,
+  type ModelOnlyPickerEntry,
+} from "./modelOnlyPicker";
 import { getProviderStatusMessage, hasProviderSetup } from "./ProviderStatusBanner";
 import {
   modelPickerLegacySectionKey,
@@ -41,7 +49,8 @@ import {
 } from "../ui/combobox";
 import { ModelEsque } from "./providerIconUtils";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
-import { primaryServerKeybindingsAtom } from "../../state/server";
+import { useEnvironmentQuery } from "../../state/query";
+import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/server";
 import {
   modelPickerJumpCommandForIndex,
   modelPickerJumpIndexFromCommand,
@@ -56,6 +65,7 @@ import { cn } from "~/lib/utils";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import { TooltipProvider } from "../ui/tooltip";
 import { InlineButton } from "../ui/button";
+import { toastManager } from "../ui/toast";
 import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
@@ -133,12 +143,14 @@ function shouldOfferModelPickerSetup(
 
 function adjacentModelPickerProvider(input: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
-  selectedInstanceId: ProviderInstanceId | "favorites";
+  selectedInstanceId: ProviderInstanceId | "favorites" | "models";
+  includeModels: boolean;
   direction: 1 | -1;
   disabledInstanceIds: ReadonlySet<ProviderInstanceId> | undefined;
   selectableUnavailableInstanceIds: ReadonlySet<ProviderInstanceId> | undefined;
 }) {
-  const providers: Array<ProviderInstanceId | "favorites"> = [
+  const providers: Array<ProviderInstanceId | "favorites" | "models"> = [
+    ...(input.includeModels ? (["models"] as const) : []),
     "favorites",
     ...input.entries
       .filter(
@@ -159,8 +171,10 @@ function adjacentModelPickerProvider(input: {
   ]!;
 }
 
+const NO_QUOTA_REASON =
+  "No account reports fresh quota for this model. Choose it from a provider instead.";
 const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
-const MODEL_LIST_ESTIMATED_ITEM_SIZE = 52;
+const MODEL_LIST_ESTIMATED_ITEM_SIZE = 76;
 
 function ModelListSeparator() {
   return <div className="h-0.5" />;
@@ -184,6 +198,27 @@ function modelJumpLabelsByKey(
     }
   }
   return mapping.size > 0 ? mapping : EMPTY_MODEL_JUMP_LABELS;
+}
+
+// Lists every account offering the model, so it is clear why one was chosen.
+function modelOnlyQuotaDetail(
+  entry: ModelOnlyPickerEntry<ModelPickerItem> | undefined,
+  quotaDetail: string | undefined,
+): string | undefined {
+  if (!entry || entry.catalog.candidateQuotas.length < 2) return quotaDetail;
+  const accounts = entry.catalog.candidateQuotas
+    .map(
+      (candidate) =>
+        `${candidate.shortLabel} ${
+          candidate.isUnavailable
+            ? "unavailable"
+            : candidate.remainingPercent === null
+              ? "quota unknown"
+              : `${candidate.remainingPercent}%`
+        }`,
+    )
+    .join(", ");
+  return [quotaDetail, `Accounts: ${accounts}`].filter(Boolean).join(" · ");
 }
 
 function ModelPickerProviderNotices({
@@ -356,6 +391,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   onRequestClose?: () => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
+  /**
+   * Adds a Models view that lists each exact model once and picks the account with the most
+   * quota left. Single-select only; pickers that persist a specific account should leave it off.
+   */
+  modelOnlyView?: boolean;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const {
@@ -369,6 +409,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     onOpenProviderSetup,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
+  const [quotaClock, setQuotaClock] = useState(Date.now);
+  useEffect(() => {
+    const interval = setInterval(() => setQuotaClock(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modelListRef = useRef<LegendListRef | null>(null);
   const pickerContentRef = useRef<HTMLDivElement>(null);
@@ -376,6 +421,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const { favorites } = useEnvironmentModelPreferences(props.environmentId);
   const activeEntry = props.instanceEntries.find(
     (entry) => entry.instanceId === props.activeInstanceId,
+  );
+  const quotaByInstance = new Map(
+    instanceEntries.map(
+      (entry) =>
+        [entry.instanceId, providerQuotaSummary(entry.snapshot.usageLimits, quotaClock)] as const,
+    ),
   );
   const activeModel = resolveModelPickerSelectedModel({
     driverKind: activeEntry?.driverKind,
@@ -417,18 +468,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       activeEntry,
       modelOptionsByInstance.get(props.activeInstanceId) ?? [],
     );
-  const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
-    () => {
-      if (
-        props.lockedProvider !== null ||
-        activeInstanceHasSelectableUnavailableModel ||
-        activeInstanceNeedsSetup
-      ) {
-        return props.activeInstanceId;
-      }
-      return favorites.length > 0 ? "favorites" : props.activeInstanceId;
-    },
-  );
+  const modelOnlyViewEnabled = props.modelOnlyView === true && onToggleModel === undefined;
+  const [selectedInstanceId, setSelectedInstanceId] = useState<
+    ProviderInstanceId | "favorites" | "models"
+  >(() => {
+    // A provider that needs attention keeps the spotlight so its setup notice stays visible.
+    if (activeInstanceHasSelectableUnavailableModel || activeInstanceNeedsSetup) {
+      return props.activeInstanceId;
+    }
+    if (modelOnlyViewEnabled) return "models";
+    if (props.lockedProvider !== null) return props.activeInstanceId;
+    return favorites.length > 0 ? "favorites" : props.activeInstanceId;
+  });
   const favoritesSet = new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
   const [expandedLegacyInstances, setExpandedLegacyInstances] = useState(
     () =>
@@ -443,12 +494,23 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const keybindings = providedKeybindings ?? serverKeybindings;
   const [searchHeight, setSearchHeight] = useState(0);
   const toggleFavorite = useToggleEnvironmentModelFavorite(props.environmentId);
+  const isModelOnlyView = modelOnlyViewEnabled && selectedInstanceId === "models";
+  const [usageRankingWindow] = useState(() => makeWindow(30));
+  // Recent token use orders the Models view; it is only fetched while that view is open.
+  const usageRanking = useEnvironmentQuery(
+    isModelOnlyView && props.environmentId
+      ? serverEnvironment.usageSummary({
+          environmentId: props.environmentId,
+          input: usageRankingWindow,
+        })
+      : null,
+  );
 
   const focusSearchInput = () => {
     searchInputRef.current?.focus({ preventScroll: true });
   };
 
-  const handleSelectInstance = (instanceId: ProviderInstanceId | "favorites") => {
+  const handleSelectInstance = (instanceId: ProviderInstanceId | "favorites" | "models") => {
     setSelectedInstanceId(instanceId);
     window.requestAnimationFrame(() => {
       focusSearchInput();
@@ -479,32 +541,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       }
       return next;
     });
-  };
-
-  const handleModelSelect = (
-    modelSlug: string,
-    instanceId: ProviderInstanceId,
-    additive = false,
-  ) => {
-    if (getModelDisabledReason?.(instanceId, modelSlug)) {
-      return;
-    }
-    const options = modelOptionsByInstance.get(instanceId);
-    if (!options) {
-      return;
-    }
-    const entry = instanceEntries.find((candidate) => candidate.instanceId === instanceId);
-    if (!entry) {
-      return;
-    }
-    const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
-    if (resolvedModel) {
-      if (additive && onToggleModel) {
-        onToggleModel(instanceId, resolvedModel);
-      } else {
-        onInstanceModelChange(instanceId, resolvedModel);
-      }
-    }
   };
 
   const modelJumpShortcutContext = {
@@ -617,7 +653,123 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
   const instanceOrder = instanceEntries.map((entry) => entry.instanceId);
 
+  const providerSnapshots = instanceEntries.map((entry) => entry.snapshot);
+  // A model is a favorite when any account offering it is; the star sets every account together.
+  const isModelOnlyEntryFavorite = (entry: ModelOnlyPickerEntry<ModelPickerItem>) =>
+    entry.catalog.candidates.some((candidate) =>
+      favoritesSet.has(providerModelKey(candidate.item.instanceId, candidate.item.slug)),
+    );
+  const modelOnlyEntries: ReadonlyArray<ModelOnlyPickerEntry<ModelPickerItem>> = isModelOnlyView
+    ? favoritesFirstBy(
+        buildModelOnlyPickerEntries(
+          flatModels.filter(
+            (model) =>
+              matchesLockedProvider(model) &&
+              !getModelDisabledReason?.(model.instanceId, model.slug) &&
+              (!model.isLegacy || favoritesSet.has(providerModelKey(model.instanceId, model.slug))),
+          ),
+          providerSnapshots,
+          usageRanking.data,
+          quotaClock,
+        ),
+        isModelOnlyEntryFavorite,
+      )
+    : [];
+  const modelOnlyFavoriteKeys = new Set(
+    modelOnlyEntries
+      .filter(isModelOnlyEntryFavorite)
+      .map((entry) => providerModelKey(entry.item.instanceId, entry.item.slug)),
+  );
+  const modelOnlyEntryByKey = new Map(
+    modelOnlyEntries.map(
+      (entry) => [modelPickerModelKey(entry.item.instanceId, entry.item.slug), entry] as const,
+    ),
+  );
+  const toggleModelFavorite = (instanceId: ProviderInstanceId, slug: string) => {
+    const entry = modelOnlyEntryByKey.get(modelPickerModelKey(instanceId, slug));
+    if (!entry) {
+      void toggleFavorite(instanceId, slug);
+      return;
+    }
+    const target = !isModelOnlyEntryFavorite(entry);
+    for (const candidate of entry.catalog.candidates) {
+      if (
+        favoritesSet.has(providerModelKey(candidate.item.instanceId, candidate.item.slug)) !==
+        target
+      ) {
+        void toggleFavorite(candidate.item.instanceId, candidate.item.slug);
+      }
+    }
+  };
+  // The list row stands for every account offering the model, so the active one marks it too.
+  const modelOnlyActiveKey =
+    modelOnlyEntries.find((entry) =>
+      entry.catalog.candidates.some((candidate) => candidate.key === activeModelKey),
+    ) ?? null;
+  const modelDisabledReason = (model: ModelPickerItem): string | null =>
+    isModelOnlyView
+      ? modelOnlyEntryByKey.get(modelPickerModelKey(model.instanceId, model.slug))?.winner
+        ? null
+        : NO_QUOTA_REASON
+      : (getModelDisabledReason?.(model.instanceId, model.slug) ?? null);
+
+  const handleModelSelect = (
+    modelSlug: string,
+    pickedInstanceId: ProviderInstanceId,
+    additive = false,
+  ) => {
+    let instanceId = pickedInstanceId;
+    if (isModelOnlyView) {
+      // Quota is re-read now: the list may have been open for minutes.
+      const entry = modelOnlyEntryByKey.get(modelPickerModelKey(pickedInstanceId, modelSlug));
+      // oxlint-disable-next-line react/purity -- Read when the user picks, not during render.
+      const account = entry ? selectModelOnlyAccount(entry, providerSnapshots, Date.now()) : null;
+      if (!account) {
+        toastManager.add({
+          type: "warning",
+          title: "No quota available",
+          description: NO_QUOTA_REASON,
+        });
+        return;
+      }
+      modelSlug = account.slug;
+      instanceId = account.instanceId;
+    }
+    if (getModelDisabledReason?.(instanceId, modelSlug)) {
+      return;
+    }
+    const options = modelOptionsByInstance.get(instanceId);
+    if (!options) {
+      return;
+    }
+    const entry = instanceEntries.find((candidate) => candidate.instanceId === instanceId);
+    if (!entry) {
+      return;
+    }
+    const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
+    if (resolvedModel) {
+      if (additive && onToggleModel) {
+        onToggleModel(instanceId, resolvedModel);
+      } else {
+        onInstanceModelChange(instanceId, resolvedModel);
+      }
+    }
+  };
+
   const filteredModels = (() => {
+    if (isModelOnlyView) {
+      const shown = modelOnlyEntries.map((entry) => entry.item);
+      return searchQuery.trim()
+        ? rankModelPickerSearch(shown, searchQuery, (model) => ({
+            name: model.name,
+            ...(model.shortName ? { shortName: model.shortName } : {}),
+            ...(model.subProvider ? { subProvider: model.subProvider } : {}),
+            driverKind: model.driverKind,
+            providerDisplayName: model.instanceDisplayName,
+            isFavorite: modelOnlyFavoriteKeys.has(providerModelKey(model.instanceId, model.slug)),
+          }))
+        : shown;
+    }
     let result = flatModels;
 
     if (searchQuery.trim()) {
@@ -654,7 +806,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   })();
 
   const legacySection = (() => {
-    if (isSearching || selectedInstanceId === "favorites") {
+    if (isSearching || selectedInstanceId === "favorites" || selectedInstanceId === "models") {
       return null;
     }
     const currentModels: ModelPickerItem[] = [];
@@ -686,7 +838,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   })();
 
   const selectedEntry =
-    selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
+    selectedInstanceId === "favorites" || selectedInstanceId === "models"
+      ? undefined
+      : entryByInstanceId.get(selectedInstanceId);
   const providerSetupEntries =
     !isSearching && canOpenProviderSetup
       ? instanceEntries.filter(
@@ -712,7 +866,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   // The first selectable models get the numbered jump shortcuts, in list order.
   const modelJumpModelKeys = visibleModels
-    .filter((model) => !getModelDisabledReason?.(model.instanceId, model.slug))
+    .filter((model) => !modelDisabledReason(model))
     .slice(0, MODEL_PICKER_JUMP_KEYBINDING_COMMANDS.length)
     .map((model) => modelPickerModelKey(model.instanceId, model.slug));
   const allItemKeys = ((): string[] => [
@@ -767,6 +921,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       const next = adjacentModelPickerProvider({
         entries: sidebarInstanceEntries,
         selectedInstanceId,
+        includeModels: modelOnlyViewEnabled,
         direction: command === "modelPicker.nextProvider" ? 1 : -1,
         disabledInstanceIds: lockedDisabledInstanceIds,
         selectableUnavailableInstanceIds,
@@ -809,6 +964,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             onFocusSearch={focusSearchInput}
             instanceEntries={sidebarInstanceEntries}
             showFavorites
+            showModels={modelOnlyViewEnabled}
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
               ? {
@@ -829,7 +985,18 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           open
           virtualized
           multiple={onToggleModel !== undefined}
-          value={onToggleModel ? [...selectedModelKeySet] : activeModelKey}
+          value={
+            onToggleModel
+              ? [...selectedModelKeySet]
+              : isModelOnlyView
+                ? modelOnlyActiveKey
+                  ? modelPickerModelKey(
+                      modelOnlyActiveKey.item.instanceId,
+                      modelOnlyActiveKey.item.slug,
+                    )
+                  : null
+                : activeModelKey
+          }
           onItemHighlighted={(modelKey, eventDetails) => {
             highlightedModelKeyRef.current = typeof modelKey === "string" ? modelKey : null;
             if (eventDetails.reason === "keyboard" && eventDetails.index >= 0) {
@@ -961,8 +1128,19 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 if (!model) {
                   return null;
                 }
-                const disabledReason =
-                  getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                const disabledReason = modelDisabledReason(model);
+                const modelOnlyEntry = isModelOnlyView
+                  ? modelOnlyEntryByKey.get(modelKey)
+                  : undefined;
+                const quota =
+                  model.driverKind === "antigravity"
+                    ? providerQuotaSummary(
+                        instanceEntries.find((entry) => entry.instanceId === model.instanceId)
+                          ?.snapshot.usageLimits,
+                        quotaClock,
+                        { driver: model.driverKind, model: model.slug },
+                      )
+                    : quotaByInstance.get(model.instanceId);
                 return (
                   <ModelListRow
                     key={modelKey}
@@ -977,7 +1155,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     providerAccentColor={model.instanceAccentColor}
                     acpRegistryAgentId={model.acpRegistryAgentId}
                     acpRegistryIconUrl={model.acpRegistryIconUrl}
-                    isFavorite={favoritesSet.has(providerModelKey(model.instanceId, model.slug))}
+                    isFavorite={
+                      modelOnlyEntry
+                        ? modelOnlyFavoriteKeys.has(providerModelKey(model.instanceId, model.slug))
+                        : favoritesSet.has(providerModelKey(model.instanceId, model.slug))
+                    }
                     isSelected={
                       selectedModelKeys !== undefined
                         ? selectedModelKeySet.has(modelKey)
@@ -991,7 +1173,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     unavailable={model.isUnavailable === true}
                     jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                     disabledReason={disabledReason}
-                    onToggleFavorite={toggleFavorite}
+                    quotaSummary={quota?.label ?? "Quota unavailable"}
+                    quotaDetail={modelOnlyQuotaDetail(modelOnlyEntry, quota?.detail)}
+                    onToggleFavorite={toggleModelFavorite}
                   />
                 );
               }}

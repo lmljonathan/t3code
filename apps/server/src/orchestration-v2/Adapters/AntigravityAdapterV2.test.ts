@@ -27,6 +27,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { makeTurnInput } from "./AcpAdapterV2.testkit.ts";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
 import { normalizeAntigravitySessionUpdate } from "../../provider/acp/AntigravityProtocol.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -60,6 +61,22 @@ function permissionRequest(
 }
 
 describe("AntigravityAdapterV2 flavor", () => {
+  it("does not treat ordinary discussion of quota limits as a native denial", () => {
+    const observedAt = DateTime.makeUnsafe("2026-10-25T04:40:00Z");
+    for (const text of [
+      "OK",
+      "The error says: Usage Limit Reached\n\nYou have reached your current quota for this period.",
+      "Usage Limit Reached is a heading in the documentation.",
+    ]) {
+      assert.isUndefined(flavor.assistantMessageFailure?.(text, observedAt));
+    }
+    const denied = flavor.assistantMessageFailure?.(
+      "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 21 hours, 15 minutes.",
+      observedAt,
+    );
+    assert.equal(denied?.resetAt, "2026-10-26T01:55:00.000Z");
+  });
+
   it("keeps a successful subagent launch running until the parent turn becomes idle", () => {
     const batch = flavor.extractSubagentUpdate?.({
       toolCallId: "trajectory:4",
@@ -670,6 +687,102 @@ describe("AntigravityAdapterV2 html_render pages", () => {
       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, report), undefined);
       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, failed), undefined);
       assert.strictEqual(yield* mcpSessions.takeHtmlRender(threadId, errored), undefined);
+    }).pipe(Effect.provide(layerSession), Effect.scoped),
+  );
+});
+
+describe("Antigravity quota responses", () => {
+  it.effect("fails a completed prompt whose assistant response reports exhausted quota", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const crypto = yield* Crypto.Crypto;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("antigravity-quota-test");
+      const threadId = ThreadId.make("thread-antigravity-quota-test");
+      type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      let notify: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
+      const adapter = yield* makeAntigravityAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        makeRuntime: (input) =>
+          makeAntigravityAcpRuntime({
+            ...input,
+            childProcessSpawner: spawner,
+            spawn: {
+              command: process.execPath,
+              args: [mockAgentPath],
+              cwd: input.cwd,
+              env: { T3_ACP_ANTIGRAVITY: "1" },
+            },
+          }).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.map((runtime): Runtime => ({
+              ...runtime,
+              handleSessionUpdate: (handler) =>
+                Effect.sync(() => {
+                  notify = handler;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(handler))),
+              prompt: () =>
+                Effect.gen(function* () {
+                  if (!notify) return yield* Effect.die("Missing session update handler");
+                  for (const text of [
+                    "Usage Limit Reached\n\n",
+                    "You have reached your current quota for this period. Your limit will reset in 21 hours, 15 minutes.",
+                  ]) {
+                    yield* notify({
+                      sessionId: "mock-session-1",
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        content: { type: "text", text },
+                      },
+                    });
+                  }
+                  return { stopReason: "end_turn" as const };
+                }),
+            })),
+          ),
+        withProcess: (_stop, task) => task,
+        defaultModel: Effect.succeed(undefined),
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "gemini-test-low" } as const;
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-antigravity-quota-test"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* session.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* session.startTurn({
+        ...makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+        modelSelection,
+      });
+      const events = yield* session.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      const terminal = events.find((event) => event.type === "turn.terminal");
+      assert.equal(terminal?.status, "failed");
+      assert.equal(terminal?.failure?.class, "usage_limit");
+      assert.include(terminal?.failure?.message ?? "", "21 hours, 15 minutes");
+      assert.isDefined(terminal?.failure?.resetAt);
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });

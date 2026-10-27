@@ -1,3 +1,4 @@
+import { modelUsageWindows, remainingPercent } from "@t3tools/shared/usageLimits";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -615,6 +616,28 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   }, [thread, props.providers]);
 
   const providerInstance = props.providerInstance;
+  const quotaProvider = props.providers?.find(
+    (provider) =>
+      provider.instanceId ===
+      (thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId),
+  );
+  const quotaWindows = quotaProvider
+    ? modelUsageWindows(quotaProvider.usageLimits, {
+        driver: quotaProvider.driver,
+        model: thread.modelSelection.model,
+      })
+    : [];
+  const sessionWindows = quotaWindows.filter(
+    (window) =>
+      window.kind === "session" ||
+      window.id.endsWith("-denied") ||
+      (quotaProvider?.driver === "antigravity" && window.id.endsWith("-quota")),
+  );
+  const sessionQuota =
+    !quotaProvider?.usageLimits?.unavailable && sessionWindows.length
+      ? Math.min(...sessionWindows.map(remainingPercent))
+      : null;
+
   const pr = useThreadPr(thread);
   const prBadgeLabel = pr ? resolveThreadPrBadgeAction(pr).accessibilityLabel : null;
   const handleOpenPullRequests = useCallback(() => {
@@ -1228,6 +1251,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </View>
         ) : null}
       </View>
+      {!sidebarPane ? (
+        <Text
+          className={cn(
+            "mt-1 text-xs",
+            selected
+              ? selectedThreadRowColors.mutedForegroundClassName
+              : rowAppearance.mutedForegroundClassName,
+          )}
+          style={{ fontVariant: ["tabular-nums"] }}
+          numberOfLines={1}
+        >
+          {sessionQuota === null
+            ? "Session quota unavailable"
+            : `Session ${sessionQuota}% remaining`}
+        </Text>
+      ) : null}
     </>
   );
 

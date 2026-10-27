@@ -281,6 +281,11 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
         expect(snapshot.models.map((model) => model.slug)).toEqual([
           "gemini-test-low",
           "gemini-test-high",
+          "gemini-3.8-flash-high",
+          "gemini-3.8-flash-medium",
+          "gemini-3.8-flash-low",
+          "claude-sonnet-4-6",
+          "claude-opus-4-6",
         ]);
         expect(snapshot.models[0]?.aliases).toContain(ANTIGRAVITY_DEFAULT_MODEL);
         expect(snapshot.models.every((model) => model.isLegacy !== true)).toBe(true);

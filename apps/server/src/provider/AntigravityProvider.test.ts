@@ -9,6 +9,8 @@ import {
   type ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -620,6 +622,54 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
           expect((yield* harness.provider.snapshot.refresh).usageLimits?.windows).toEqual([]);
         }),
       ),
+  );
+
+  it.effect("keeps native Gemini denials at zero across conflicting quota refreshes", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const resetAt = DateTime.formatIso(DateTime.add(now, { hours: 2 }));
+      const harness = yield* makeHarness({
+        probeUsage: Effect.succeed({
+          checkedAt: DateTime.formatIso(now),
+          windows: [
+            { id: "gemini-quota", kind: "other", label: "Gemini", usedPercent: 1 },
+            { id: "3p-5h", kind: "session", label: "Claude & GPT", usedPercent: 10 },
+          ],
+        }),
+      });
+      yield* harness.initialize;
+      yield* harness.provider.onTurnSettled({
+        modelSelection: { model: "gemini-3.8-flash-high" },
+        status: "failed",
+        failure: makeProviderFailure({
+          class: "usage_limit",
+          code: "antigravity_quota_exceeded",
+          message: "Usage Limit Reached",
+          retryable: true,
+          resetAt,
+        }),
+      });
+      const expectDenial = (limits: ServerProviderUsageLimits | undefined) => {
+        expect(limits?.windows.find((window) => window.id === "gemini-denied")).toMatchObject({
+          usedPercent: 100,
+          resetsAt: resetAt,
+        });
+        expect(limits?.windows.some((window) => window.id === "gemini-quota")).toBe(false);
+        expect(limits?.windows.find((window) => window.id === "3p-5h")?.usedPercent).toBe(10);
+      };
+      expectDenial((yield* harness.provider.snapshot.getSnapshot).usageLimits);
+      yield* harness.provider.snapshot.refresh;
+      expectDenial((yield* harness.provider.snapshot.getSnapshot).usageLimits);
+      yield* harness.provider.onTurnSettled({
+        modelSelection: { model: "gemini-3.8-flash-high" },
+        status: "completed",
+      });
+      expect(
+        (yield* harness.provider.snapshot.getSnapshot).usageLimits?.windows.find(
+          (window) => window.id === "gemini-quota",
+        )?.usedPercent,
+      ).toBe(1);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("a quota read finishing after sign-out cannot restore account limits", () =>

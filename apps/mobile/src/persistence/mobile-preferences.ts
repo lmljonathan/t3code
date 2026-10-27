@@ -17,6 +17,10 @@ import {
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { isMicrophoneKind, type MicrophoneEntry } from "../lib/microphonePriority";
+import {
+  sanitizeModelUsageRankingCache,
+  type ModelUsageRankingCache,
+} from "../lib/modelUsageRankingCache";
 import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
 import * as MobileDatabase from "./mobile-database";
 import * as MobileSecureStorage from "./mobile-secure-storage";
@@ -80,6 +84,8 @@ export interface Preferences {
     readonly provider: ProviderInstanceId;
     readonly model: string;
   }>;
+  /** The last token ranking the Models view showed, so it can open in order before usage loads. */
+  readonly modelUsageRanking?: ModelUsageRankingCache;
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
   readonly threadListWorkingShelfExpanded?: boolean;
@@ -150,6 +156,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     planModeEnabled?: boolean;
     workingShelfEnabled?: boolean;
     modelFavorites?: Preferences["modelFavorites"];
+    modelUsageRanking?: ModelUsageRankingCache;
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
     threadListWorkingShelfExpanded?: boolean;
@@ -267,6 +274,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
         favorite.model.trim().length > 0,
     );
   }
+  const modelUsageRanking = sanitizeModelUsageRankingCache(parsed.modelUsageRanking);
+  if (modelUsageRanking) preferences.modelUsageRanking = modelUsageRanking;
   if (typeof parsed.threadListSettledShelfExpanded === "boolean") {
     preferences.threadListSettledShelfExpanded = parsed.threadListSettledShelfExpanded;
   }

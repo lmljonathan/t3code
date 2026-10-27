@@ -3057,7 +3057,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onItemSizeChanged={handleItemSizeChanged}
             drawDistance={500}
             keyboardShouldPersistTaps="always"
-            keyboardDismissMode="none"
+            keyboardDismissMode="on-drag"
             keyboardLiftBehavior="whenAtEnd"
             // Seed the list's scroll math with the real viewport before its own
             // onLayout: the empty→filled remount can then tell at mount that

@@ -40,6 +40,8 @@ export const ModelListRow = memo(function ModelListRow(props: {
   unavailable?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
+  quotaSummary: string;
+  quotaDetail?: string | undefined;
   onToggleFavorite: (instanceId: ProviderInstanceId, slug: string) => void;
 }) {
   const model = {
@@ -100,6 +102,29 @@ export const ModelListRow = memo(function ModelListRow(props: {
               {providerLabel}
             </span>
           </div>
+        )}
+        {/* Its own line, wrapping rather than truncating: quota text is long and the name must stay readable. */}
+        {props.quotaDetail ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  className="mt-1 line-clamp-2 block break-words text-3xs font-normal leading-snug text-muted-foreground"
+                  aria-label={props.quotaDetail}
+                />
+              }
+            >
+              {props.quotaSummary}
+            </TooltipTrigger>
+            <TooltipPopup side="top">{props.quotaDetail}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          <span
+            className="mt-1 line-clamp-2 block break-words text-3xs font-normal leading-snug text-muted-foreground"
+            aria-label={props.quotaSummary}
+          >
+            {props.quotaSummary}
+          </span>
         )}
       </div>
 

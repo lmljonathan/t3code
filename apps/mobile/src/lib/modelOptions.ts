@@ -16,6 +16,7 @@ import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
+import { providerQuotaSummary } from "@t3tools/shared/usageLimits";
 
 export type ModelOption = {
   readonly key: string;
@@ -31,6 +32,7 @@ export type ModelOption = {
     readonly accentColor?: string;
     readonly showBadge: boolean;
   };
+  readonly quotaSummary?: ReturnType<typeof providerQuotaSummary>;
   readonly isDefault: boolean;
   readonly isLegacy: boolean;
   readonly isUnavailable?: boolean;
@@ -243,6 +245,7 @@ export function buildModelOptions(
   providerInstanceId: ModelSelection["instanceId"] | undefined,
   projectId: ProjectId | null,
   includeHidden = false,
+  includeHiddenFallback = false,
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
   const lockedProvider = config?.providers.find(
@@ -310,6 +313,7 @@ export function buildModelOptions(
 
     const providerLabel = providerDisplayLabel(provider);
     const providerBadge = providerBadgeFor(provider.instanceId);
+    const quotaSummary = providerQuotaSummary(provider.usageLimits);
     const updateRequired = provider.updateRequiredModels?.length
       ? { driver: provider.driver, updateRequiredModels: provider.updateRequiredModels }
       : undefined;
@@ -331,6 +335,13 @@ export function buildModelOptions(
         providerLabel,
         providerDriver: provider.driver,
         providerBadge,
+        quotaSummary:
+          provider.driver === "antigravity"
+            ? providerQuotaSummary(provider.usageLimits, Date.now(), {
+                driver: provider.driver,
+                model: model.slug,
+              })
+            : quotaSummary,
         ...(provider.supportedRuntimeModes === undefined
           ? {}
           : { supportedRuntimeModes: provider.supportedRuntimeModes }),
@@ -356,9 +367,11 @@ export function buildModelOptions(
     fallbackModelSelection &&
     (providerInstanceId === undefined ||
       fallbackModelSelection.instanceId === providerInstanceId) &&
-    (!config?.settings?.providerModelPreferences?.[
-      fallbackModelSelection.instanceId
-    ]?.hiddenModels.includes(fallbackModelSelection.model) ||
+    (includeHidden ||
+      includeHiddenFallback ||
+      !config?.settings?.providerModelPreferences?.[
+        fallbackModelSelection.instanceId
+      ]?.hiddenModels.includes(fallbackModelSelection.model) ||
       config?.providers
         .find((provider) => provider.instanceId === fallbackModelSelection.instanceId)
         ?.models.find((model) => model.slug === fallbackModelSelection.model)?.isCustom)
@@ -396,8 +409,23 @@ export function buildModelOptions(
         providerLabel,
         providerDriver,
         providerBadge: providerBadgeFor(fallbackModelSelection.instanceId),
+        quotaSummary: providerQuotaSummary(
+          provider?.usageLimits,
+          Date.now(),
+          provider
+            ? {
+                driver: provider.driver,
+                model: fallbackModelSelection.model,
+              }
+            : undefined,
+        ),
         isDefault: false,
         isLegacy: model?.isLegacy === true,
+        ...(config?.settings?.providerModelPreferences?.[
+          fallbackModelSelection.instanceId
+        ]?.hiddenModels.includes(fallbackModelSelection.model)
+          ? { isHidden: true }
+          : {}),
         ...(isModelSelectionUnavailable(config, fallbackModelSelection, projectId) ||
         (provider !== undefined && !isProviderEnabledForProject(config, provider, projectId)) ||
         provider?.updateRequiredModels?.some((gated) => gated.slug === fallbackModelSelection.model)

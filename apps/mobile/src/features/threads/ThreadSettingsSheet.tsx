@@ -1,3 +1,13 @@
+import { SliderRow } from "../../components/ui/SliderRow";
+import { comparableModelName } from "@t3tools/shared/model";
+import {
+  buildModelOnlyCatalog,
+  favoritesFirstBy,
+  selectModelProvider,
+  type ModelCandidateQuota,
+  type ModelOnlyEntry,
+} from "../../lib/modelOnlyCatalog";
+import { SegmentedControl } from "../../components/ui/SegmentedControl";
 import {
   getPromptControlledTraits,
   getTraitSelectChange,
@@ -7,6 +17,7 @@ import { Toolbar } from "../../components/ui/Toolbar";
 import * as Dialog from "../../components/ui/Dialog";
 import { createV5StackNavigator as createNativeStackNavigator } from "../../native/createV5StackNavigator";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
 import {
   modelPreferencesMigrationPatch,
   resolveModelPreferences,
@@ -76,6 +87,7 @@ import { environmentServerConfigsAtom, serverEnvironment } from "../../state/ser
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useNewTaskFlow } from "./new-task-flow-provider";
+import { useModelUsageRanking } from "./use-model-usage-ranking";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import {
   createProviderCatalogRefreshRunner,
@@ -304,12 +316,17 @@ export function useExistingThreadSettingsRoutePresentation() {
 }
 
 type ThreadSettingsSessionValue = {
+  readonly catalogView: "providers" | "models";
+  readonly setCatalogView: (view: "providers" | "models") => void;
+  readonly modelCatalog: ReadonlyArray<ModelOnlyEntry>;
+  readonly usageRankingStatus: string;
+  readonly refreshUsageRanking: () => void;
   readonly environmentId: EnvironmentId | null;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly favoriteKeys: ReadonlySet<string>;
   readonly favoritesLoaded: boolean;
-  readonly toggleFavorite: (option: ModelOption) => void;
+  readonly toggleFavorite: (options: ReadonlyArray<ModelOption>) => void;
   readonly toggleHidden: (option: ModelOption) => void;
   readonly pendingHiddenKeys: ReadonlySet<string>;
   readonly manageHidden: boolean;
@@ -352,6 +369,18 @@ function ThreadSettingsSessionProvider(
     props.environmentId ? environmentCatalog.stateAtom(props.environmentId) : null,
   ).data;
   const connectionGeneration = connection?.phase === "connected" ? connection.generation : null;
+  const [catalogView, setCatalogViewState] = useState<"providers" | "models">("models");
+  const [quotaNow, setQuotaNow] = useState(Date.now);
+  const setCatalogView = (view: "providers" | "models") => {
+    setQuotaNow(Date.now());
+    setCatalogViewState(view);
+  };
+  useEffect(() => {
+    if (catalogView !== "models") return;
+    const timer = setInterval(() => setQuotaNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, [catalogView]);
+  const usageRanking = useModelUsageRanking(props.environmentId ?? null, catalogView === "models");
   const [manageHidden, setManageHidden] = useState(false);
   const pendingHidden = useRef(new Set<string>());
   const pendingFavorites = useRef(
@@ -403,65 +432,72 @@ function ThreadSettingsSessionProvider(
   const favoriteKeys = new Set(
     modelFavorites.map((favorite) => modelFavoriteKey(favorite.provider, favorite.model)),
   );
-  const toggleFavorite = async (option: ModelOption) => {
+  // The options are one model's accounts: it is a favorite when any is, and the star sets all.
+  const toggleFavorite = async (options: ReadonlyArray<ModelOption>) => {
     const environmentId = props.environmentId;
-    if (!favoritesLoaded || !environmentId) return;
+    if (!favoritesLoaded || !environmentId || options.length === 0) return;
     const currentSettings = registry.get(environmentServerConfigsAtom).get(environmentId)?.settings;
     if (!currentSettings) return;
     const favorites = resolveModelPreferences(currentSettings, {
       favorites: legacyFavorites,
     }).favorites;
-    const key = JSON.stringify([
-      environmentId,
-      option.selection.instanceId,
-      option.selection.model,
-    ]);
-    const previous = pendingFavorites.current.get(key);
-    const previousFavorite =
-      previous && (previous.pending || previous.settings.favorites === currentSettings.favorites)
-        ? previous.favorite
-        : favorites.some(
-            (favorite) =>
-              favorite.provider === option.selection.instanceId &&
-              favorite.model === option.selection.model,
-          );
-    const pending = { favorite: !previousFavorite, settings: currentSettings, pending: true };
-    pendingFavorites.current.set(key, pending);
+    const entries = options.map((option) => {
+      const key = JSON.stringify([
+        environmentId,
+        option.selection.instanceId,
+        option.selection.model,
+      ]);
+      const previous = pendingFavorites.current.get(key);
+      const previousFavorite =
+        previous && (previous.pending || previous.settings.favorites === currentSettings.favorites)
+          ? previous.favorite
+          : favorites.some(
+              (favorite) =>
+                favorite.provider === option.selection.instanceId &&
+                favorite.model === option.selection.model,
+            );
+      return { option, key, previous, previousFavorite };
+    });
+    const favorite = !entries.some((entry) => entry.previousFavorite);
+    const pendings = entries.map((entry) => {
+      const pending = { favorite, settings: currentSettings, pending: true };
+      pendingFavorites.current.set(entry.key, pending);
+      return pending;
+    });
     void Haptics.selectionAsync();
     const result = await saveSettings({
       environmentId: environmentId,
       input: {
         patch: {
-          setModelFavorites: [
-            {
-              provider: option.selection.instanceId,
-              model: option.selection.model,
-              favorite: pending.favorite,
-            },
-          ],
+          setModelFavorites: options.map((option) => ({
+            provider: option.selection.instanceId,
+            model: option.selection.model,
+            favorite,
+          })),
           ...(currentSettings.favorites === null ? { migrateModelPreferences: { favorites } } : {}),
         },
       },
     });
-    if (
+    const settled =
       AsyncResult.isSuccess(result) &&
       registry.get(environmentServerConfigsAtom).get(environmentId)?.settings.favorites ===
-        currentSettings.favorites
-    ) {
-      pending.pending = false;
-    }
-    if (pending.pending && pendingFavorites.current.get(key) === pending) {
-      if (
-        previous &&
-        !previous.pending &&
-        registry.get(environmentServerConfigsAtom).get(environmentId)?.settings.favorites ===
-          previous.settings.favorites
-      ) {
-        pendingFavorites.current.set(key, previous);
-      } else {
-        pendingFavorites.current.delete(key);
+        currentSettings.favorites;
+    entries.forEach(({ key, previous }, index) => {
+      const pending = pendings[index]!;
+      if (settled) pending.pending = false;
+      if (pending.pending && pendingFavorites.current.get(key) === pending) {
+        if (
+          previous &&
+          !previous.pending &&
+          registry.get(environmentServerConfigsAtom).get(environmentId)?.settings.favorites ===
+            previous.settings.favorites
+        ) {
+          pendingFavorites.current.set(key, previous);
+        } else {
+          pendingFavorites.current.delete(key);
+        }
       }
-    }
+    });
   };
   const toggleHidden = (option: ModelOption) => {
     if (
@@ -532,9 +568,43 @@ function ThreadSettingsSessionProvider(
   const hasLegacyModels = props.providerGroups.some((group) =>
     group.models.some((model) => model.isLegacy),
   );
+  const automaticModel = (model: ModelOption, preserveOptions: boolean) => {
+    const currentConfig = props.environmentId
+      ? registry.get(environmentServerConfigsAtom).get(props.environmentId)
+      : undefined;
+    if (!currentConfig) return null;
+    const options = buildModelOptions(
+      currentConfig,
+      props.selectedModel,
+      props.lockedProviderInstanceId,
+      props.projectId,
+    ).filter(
+      (candidate) =>
+        comparableModelName(candidate.selection.model) ===
+          comparableModelName(model.selection.model) &&
+        (providerFilter === null ||
+          providerFilter === FAVORITES_PROVIDER_FILTER ||
+          candidate.providerKey === providerFilter) &&
+        (providerFilter !== FAVORITES_PROVIDER_FILTER || favoriteKeys.has(candidate.key)),
+    );
+    return selectModelProvider(
+      options,
+      currentConfig.providers,
+      Date.now(),
+      preserveOptions ? model.selection.options : undefined,
+    );
+  };
   const commitPendingModel = () => {
     if (pendingModel) {
-      if (!canCommitPendingModel(pendingModel, props.providerGroups)) {
+      const target = catalogView === "models" ? automaticModel(pendingModel, true) : pendingModel;
+      if (!target) {
+        Dialog.alert(
+          "No quota available",
+          "No provider reports fresh, positive session and weekly quota for this model and its selected options. Use Providers to choose an account manually.",
+        );
+        return false;
+      }
+      if (!canCommitPendingModel(target, props.providerGroups)) {
         Dialog.alert(
           "Model unavailable",
           "Set up this provider on web or desktop, or select another model.",
@@ -542,7 +612,7 @@ function ThreadSettingsSessionProvider(
         return false;
       }
       void Haptics.selectionAsync();
-      props.onSelectModel(pendingModel);
+      props.onSelectModel(target);
       if (pendingPrompt !== null && pendingPrompt !== props.prompt) {
         props.onPromptChange(pendingPrompt);
       }
@@ -600,7 +670,15 @@ function ThreadSettingsSessionProvider(
     });
   };
 
-  const pressModel = (option: ModelOption) => {
+  const pressModel = (pressed: ModelOption) => {
+    const option = catalogView === "models" ? automaticModel(pressed, false) : pressed;
+    if (!option) {
+      Dialog.alert(
+        "No quota available",
+        "No provider reports fresh, positive session and weekly quota for this model. Use Providers to choose an account manually.",
+      );
+      return;
+    }
     void Haptics.selectionAsync();
     if (isApplied(option) || option.key !== pendingModel?.key) {
       setPendingPrompt(null);
@@ -615,7 +693,47 @@ function ThreadSettingsSessionProvider(
     );
   };
 
+  const modelCatalog =
+    catalogView === "models"
+      ? favoritesFirstBy(
+          buildModelOnlyCatalog(
+            providerGroups
+              .flatMap((group) => group.models)
+              .filter(
+                (option) =>
+                  (providerFilter === null ||
+                    providerFilter === FAVORITES_PROVIDER_FILTER ||
+                    option.providerKey === providerFilter) &&
+                  (providerFilter !== FAVORITES_PROVIDER_FILTER || favoriteKeys.has(option.key)) &&
+                  (manageHidden ||
+                    showLegacyToggle ||
+                    !option.isLegacy ||
+                    isDisplayed(option) ||
+                    favoriteKeys.has(option.key)) &&
+                  modelMatchesCatalogQuery({
+                    model: option,
+                    providerLabel: option.providerLabel,
+                    query: searchQuery,
+                  }),
+              ),
+            config?.providers ?? [],
+            usageRanking.totals,
+            quotaNow,
+          ),
+          (entry) => entry.candidates.some((candidate) => favoriteKeys.has(candidate.key)),
+        )
+      : [];
   const value = {
+    catalogView,
+    setCatalogView,
+    modelCatalog,
+    usageRankingStatus:
+      usageRanking.status === "ranked"
+        ? "Most used first · reported tokens over 30 days"
+        : usageRanking.status === "loading"
+          ? "Loading usage…"
+          : "Usage unavailable · alphabetical order",
+    refreshUsageRanking: usageRanking.refresh,
     environmentId: props.environmentId,
     providerInstanceId: props.providerInstanceId,
     providerGroups,
@@ -684,8 +802,13 @@ type ThreadSettingsCatalogItem =
     }
   | {
       readonly kind: "model";
+      readonly automatic?: boolean;
+      readonly tokens?: number;
+      readonly resetAndWeeklyLabel?: string | null;
       readonly key: string;
       readonly option: ModelOption;
+      readonly candidateQuotas?: ReadonlyArray<ModelCandidateQuota>;
+      readonly candidates?: ReadonlyArray<ModelOption>;
       readonly isFirst: boolean;
       readonly isLast: boolean;
     }
@@ -704,12 +827,145 @@ type ThreadSettingsCatalogItem =
     };
 
 function ThreadSettingsModelListRow(props: {
+  readonly automatic?: boolean;
+  readonly tokens?: number;
+  readonly resetAndWeeklyLabel?: string | null;
   readonly option: ModelOption;
+  readonly candidateQuotas?: ReadonlyArray<ModelCandidateQuota>;
+  readonly candidates?: ReadonlyArray<ModelOption>;
   readonly isFirst: boolean;
   readonly isLast: boolean;
 }) {
   const session = useThreadSettingsSession();
   const onPress = () => session.pressModel(props.option);
+  if (props.automatic) {
+    const selected = session.displayedModelSelection?.model === props.option.selection.model;
+    const candidates = props.candidateQuotas ?? [];
+    const favoriteOptions = props.candidates ?? [props.option];
+    const isFavorite = favoriteOptions.some((option) => session.favoriteKeys.has(option.key));
+    const detail = props.option.isUnavailable
+      ? "No provider with usable session and weekly quota"
+      : `${props.option.providerLabel} · ${props.option.quotaSummary?.label ?? "Quota unavailable"}`;
+    const accessibilityLabel = [props.option.label, detail, props.resetAndWeeklyLabel]
+      .filter(Boolean)
+      .join(", ");
+    return (
+      <Pressable
+        accessibilityRole="radio"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityState={{ checked: selected, disabled: props.option.isUnavailable }}
+        disabled={props.option.isUnavailable}
+        onPress={onPress}
+        className={cn(
+          "mx-4 min-h-16 flex-row items-center gap-3 bg-grouped-card px-4 py-3 active:opacity-70",
+          props.isFirst && "rounded-t-2xl",
+          props.isLast ? "rounded-b-2xl" : "border-b border-border-subtle",
+        )}
+      >
+        <View className="min-w-0 flex-1 gap-1">
+          <Text className="text-base font-t3-medium text-foreground" numberOfLines={2}>
+            {props.option.label}
+          </Text>
+          {candidates.length > 0 ? (
+            <View className="mt-0.5 h-1.5 w-full flex-row gap-1">
+              {candidates.map((cand) => {
+                const fillPercent =
+                  cand.remainingPercent !== null
+                    ? Math.max(0, Math.min(100, cand.remainingPercent))
+                    : 0;
+                const isExhausted =
+                  cand.isExhausted ||
+                  (cand.remainingPercent !== null && cand.remainingPercent <= 0);
+                return (
+                  <View
+                    key={cand.option.key}
+                    className="h-full flex-1 overflow-hidden rounded-full bg-subtle-strong"
+                  >
+                    <View
+                      style={{ width: `${fillPercent}%` }}
+                      className={cn(
+                        "h-full rounded-full",
+                        cand.isWinner
+                          ? "bg-primary"
+                          : isExhausted
+                            ? "bg-red-500"
+                            : "bg-foreground-muted/60",
+                      )}
+                    />
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
+          {candidates.length > 1 ? (
+            <View className="mt-1 flex-row flex-wrap items-center gap-1.5">
+              {candidates.map((cand) => {
+                const fillPercent = cand.remainingPercent;
+                const isExhausted = cand.isExhausted || (fillPercent !== null && fillPercent <= 0);
+                return (
+                  <View
+                    key={cand.option.key}
+                    className={cn(
+                      "flex-row items-center gap-1 rounded-md px-1.5 py-0.5",
+                      cand.isWinner ? "bg-primary/15" : "bg-subtle-strong",
+                    )}
+                  >
+                    <View
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        cand.isWinner
+                          ? "bg-primary"
+                          : isExhausted
+                            ? "bg-red-500"
+                            : "bg-foreground-muted",
+                      )}
+                    />
+                    <Text
+                      className={cn(
+                        "text-2xs",
+                        cand.isWinner ? "font-t3-medium text-primary" : "text-foreground-muted",
+                      )}
+                    >
+                      {cand.shortLabel}
+                      {fillPercent !== null ? ` · ${fillPercent}%` : ""}
+                      {cand.isWinner ? " (Auto)" : ""}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+              {detail}
+            </Text>
+          )}
+          {props.resetAndWeeklyLabel ? (
+            <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
+              {props.resetAndWeeklyLabel}
+            </Text>
+          ) : null}
+        </View>
+        {selected ? (
+          <SymbolView name="checkmark" size={18} tintColorClassName="accent-icon" />
+        ) : null}
+        <Pressable
+          accessibilityLabel={`${isFavorite ? "Remove from" : "Add to"} favorites: ${props.option.label}`}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: !session.favoritesLoaded, selected: isFavorite }}
+          className="-mr-2 min-h-11 min-w-11 items-center justify-center"
+          disabled={!session.favoritesLoaded}
+          onPress={() => session.toggleFavorite(favoriteOptions)}
+        >
+          <SymbolView
+            name={isFavorite ? "star.fill" : "star"}
+            size={18}
+            tintColorClassName={isFavorite ? "accent-icon" : "accent-icon-subtle"}
+            type="monochrome"
+          />
+        </Pressable>
+      </Pressable>
+    );
+  }
 
   return (
     <ModelRow
@@ -718,7 +974,7 @@ function ThreadSettingsModelListRow(props: {
       onPress={onPress}
       isFavorite={session.favoriteKeys.has(props.option.key)}
       favoritesLoaded={session.favoritesLoaded}
-      onToggleFavorite={() => session.toggleFavorite(props.option)}
+      onToggleFavorite={() => session.toggleFavorite([props.option])}
       onToggleHidden={
         session.manageHidden && props.option.canHide
           ? () => session.toggleHidden(props.option)
@@ -753,6 +1009,26 @@ function ThreadSettingsProviderListHeader(props: {
 function buildThreadSettingsCatalogItems(
   session: ThreadSettingsSessionValue,
 ): ReadonlyArray<ThreadSettingsCatalogItem> {
+  if (session.catalogView === "models") {
+    return session.modelCatalog.flatMap((entry, index) => {
+      const option = entry.option ?? entry.candidates[0];
+      if (!option) return [];
+      return [
+        {
+          kind: "model" as const,
+          key: `model-only:${entry.modelId}`,
+          automatic: true,
+          tokens: entry.tokens,
+          resetAndWeeklyLabel: entry.resetAndWeeklyLabel,
+          option: entry.option ?? { ...option, isUnavailable: true },
+          candidateQuotas: entry.candidateQuotas,
+          candidates: entry.candidates,
+          isFirst: index === 0,
+          isLast: index === session.modelCatalog.length - 1,
+        },
+      ];
+    });
+  }
   return session.providerGroups.flatMap((group) => {
     if (
       session.providerFilter !== null &&
@@ -836,6 +1112,41 @@ function buildThreadSettingsCatalogItems(
   });
 }
 
+function ThreadSettingsReasoningSlider() {
+  const session = useThreadSettingsSession();
+  const descriptor = session.displayedDescriptors.find(
+    (entry) =>
+      entry.type === "select" && /reason|effort|thinking/i.test(`${entry.id} ${entry.label}`),
+  );
+  if (descriptor?.type !== "select" || descriptor.options.length < 2) return null;
+  const current = getProviderOptionCurrentValue(
+    descriptor,
+    session.displayedModelSelection,
+    session.reportedModelSelection,
+  );
+  const index = Math.max(
+    0,
+    descriptor.options.findIndex((option) => option.id === current),
+  );
+  return (
+    <View className="mx-4 mt-3 rounded-2xl bg-grouped-card">
+      <SliderRow
+        icon="brain"
+        label={descriptor.label}
+        valueLabel={descriptor.options[index]!.label}
+        min={0}
+        max={descriptor.options.length - 1}
+        step={1}
+        value={index}
+        onChange={(value) => {
+          const option = descriptor.options[Math.round(value)];
+          if (option) session.applyOptionChange(descriptor.id, option.id);
+        }}
+      />
+    </View>
+  );
+}
+
 function ThreadSettingsOptionsItem(props: {
   readonly animationsReady: boolean;
   readonly onOpenSubmenu: (submenu: ThreadSettingsSubmenuPage) => void;
@@ -860,6 +1171,12 @@ function ThreadSettingsOptionsItem(props: {
         layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}
       >
         {session.displayedDescriptors.map((descriptor) => {
+          if (
+            descriptor.type === "select" &&
+            descriptor.options.length > 1 &&
+            /reason|effort|thinking/i.test(`${descriptor.id} ${descriptor.label}`)
+          )
+            return null;
           if (descriptor.type === "select") {
             return (
               <Animated.View
@@ -920,7 +1237,10 @@ function ThreadSettingsOptionsItem(props: {
         <SwitchRow
           label="Manage hidden models"
           value={session.manageHidden}
-          onValueChange={session.setManageHidden}
+          onValueChange={(manageHidden) => {
+            session.setManageHidden(manageHidden);
+            if (manageHidden) session.setCatalogView("providers");
+          }}
           isLast={Platform.OS === "ios" || !session.hasLegacyModels}
         />
         {Platform.OS !== "ios" && session.hasLegacyModels ? (
@@ -943,11 +1263,21 @@ function ThreadSettingsMainContent(props: {
   const refreshProvidersCommand = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+  useEffect(() => {
+    const environmentId = session.environmentId;
+    if (!environmentId) return;
+    void refreshUsageLimits(
+      environmentId,
+      () => refreshProvidersCommand({ environmentId, input: {} }),
+      true,
+    ).catch(() => undefined);
+  }, [session.environmentId, refreshProvidersCommand]);
   const refreshProviderCatalog = createProviderCatalogRefreshRunner(refreshProvidersCommand);
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const refreshProviders = () => {
     if (!session.environmentId || isRefreshingProviders) return;
     setIsRefreshingProviders(true);
+    if (session.catalogView === "models") session.refreshUsageRanking();
     void refreshProviderCatalog(session.environmentId).then((result) => {
       setIsRefreshingProviders(false);
       const error = providerCatalogRefreshError(result);
@@ -971,6 +1301,11 @@ function ThreadSettingsMainContent(props: {
     } else if (item.kind === "model") {
       content = (
         <ThreadSettingsModelListRow
+          automatic={item.automatic}
+          tokens={item.tokens}
+          resetAndWeeklyLabel={item.resetAndWeeklyLabel}
+          candidateQuotas={item.candidateQuotas}
+          candidates={item.candidates}
           isFirst={item.isFirst}
           isLast={item.isLast}
           option={item.option}
@@ -1024,7 +1359,7 @@ function ThreadSettingsMainContent(props: {
       contentContainerStyle={{ paddingTop: 4 }}
       contentInsetAdjustmentBehavior="automatic"
       data={listItems}
-      estimatedItemSize={Platform.OS === "android" ? 56 : 48}
+      estimatedItemSize={64}
       extraData={animationsReady}
       getItemType={(item) => item.kind}
       itemLayoutAnimation={THREAD_SETTINGS_CATALOG_LAYOUT_TRANSITION}
@@ -1034,6 +1369,23 @@ function ThreadSettingsMainContent(props: {
       maintainVisibleContentPosition={THREAD_SETTINGS_MAINTAIN_VISIBLE_CONTENT_POSITION}
       ListHeaderComponent={
         <>
+          <ThreadSettingsReasoningSlider />
+          <View className="px-4 pb-3 pt-3 gap-2">
+            <SegmentedControl
+              options={[
+                { value: "providers", label: "Providers" },
+                { value: "models", label: "Models" },
+              ]}
+              selected={session.catalogView}
+              onSelect={session.setCatalogView}
+            />
+            {session.catalogView === "models" ? (
+              <Text className="px-2 text-xs text-foreground-muted">
+                {session.usageRankingStatus}
+                {"\n"}Auto-selects available quota; OpenCode is used last.
+              </Text>
+            ) : null}
+          </View>
           {Platform.OS === "android" ? (
             <View className="px-4 pb-2 pt-3">
               <View

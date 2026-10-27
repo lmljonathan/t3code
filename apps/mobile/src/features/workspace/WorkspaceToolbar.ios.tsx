@@ -169,6 +169,16 @@ export function WorkspaceToolbar(props: {
       {/* UIKit lays trailing items out from the edge inward. */}
       <Toolbar placement="right">
         <Toolbar.Button
+          accessibilityLabel="Usage"
+          icon="chart.bar.xaxis"
+          onPress={() =>
+            navigation.navigate("SettingsSheet", {
+              screen: "SettingsContent",
+              params: { screen: "SettingsUsage" },
+            })
+          }
+        />
+        <Toolbar.Button
           accessibilityLabel="Settings"
           icon="gearshape"
           onPress={() =>

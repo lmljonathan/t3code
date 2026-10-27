@@ -125,6 +125,44 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
 });
 
 describe("Antigravity subscription limits", () => {
+  it.effect("reports Gemini 4 Argon weekly limit when present in summary", () =>
+    Effect.gen(function* () {
+      const { probe } = yield* fixture({
+        summary: {
+          groups: [
+            ...summary.groups,
+            {
+              displayName: "Gemini 4 Argon",
+              buckets: [
+                {
+                  bucketId: "gemini-argon-wtu-weekly",
+                  displayName: "Gemini 4 Argon Weekly Limit",
+                  window: "weekly",
+                  remainingFraction: 0.17,
+                  resetTime: "2026-11-01T03:11:00Z",
+                },
+              ],
+            },
+          ],
+        },
+      });
+      const limits = yield* probe;
+      expect(limits.windows).toHaveLength(5);
+      const argon = limits.windows.find((window) => window.id === "argon-weekly");
+      // Clients that predate Argon support select Gemini windows by id prefix;
+      // an Argon id starting with "gemini-" would poison every Gemini model.
+      expect(limits.windows.some((window) => window.id.startsWith("gemini-argon"))).toBe(false);
+      expect(argon).toMatchObject({
+        id: "argon-weekly",
+        label: "Gemini 4 Argon · Weekly",
+        kind: "weekly",
+        windowDurationMins: 10080,
+        resetsAt: "2026-11-01T03:11:00.000Z",
+      });
+      expect(argon?.usedPercent).toBeCloseTo(83);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("reports separate Gemini and shared Claude/GPT five-hour and weekly limits", () =>
     Effect.gen(function* () {
       const { probe, requests } = yield* fixture();
@@ -185,6 +223,41 @@ describe("Antigravity subscription limits", () => {
       // whichever endpoint reported it.
       expect(byId.get("3p-5h")?.usedPercent).toBeCloseTo(70);
       expect(byId.get("3p-weekly")?.usedPercent).toBe(100);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("supplements a successful third-party-only summary with Gemini model quotas", () =>
+    Effect.gen(function* () {
+      const { probe, requests } = yield* fixture({
+        summary: { groups: [summary.groups[1]] },
+        models: {
+          models: {
+            "gemini-3.8-flash-tiered": {
+              modelProvider: "MODEL_PROVIDER_GOOGLE",
+              quotaInfo: {
+                resetTime: "2026-10-25T09:34:58Z",
+              },
+            },
+            "claude-opus": {
+              modelProvider: "MODEL_PROVIDER_ANTHROPIC",
+              quotaInfo: { remainingFraction: 1 },
+            },
+          },
+        },
+      });
+      const limits = yield* probe;
+      expect(limits.windows.map((window) => window.id).toSorted()).toEqual([
+        "3p-5h",
+        "3p-weekly",
+        "gemini-quota",
+      ]);
+      expect(limits.windows.find((window) => window.id === "gemini-quota")).toMatchObject({
+        usedPercent: 100,
+        resetsAt: "2026-10-25T09:34:58.000Z",
+      });
+      expect(
+        requests.filter((request) => request.url.endsWith(":fetchAvailableModels")),
+      ).toHaveLength(2);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -261,13 +334,14 @@ describe("Antigravity subscription limits", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("skips disabled and missing fractions and clamps valid percentages", () =>
+  it.effect("decodes omitted zero fractions, skips empty quotas and clamps percentages", () =>
     Effect.gen(function* () {
       const { probe } = yield* fixture({
         summary: {
           buckets: [
             { bucketId: "disabled", remainingFraction: 0, disabled: true },
-            { bucketId: "missing", resetTime: "2026-10-10T12:00:00Z" },
+            { bucketId: "missing" },
+            { bucketId: "gemini-weekly", window: "weekly", resetTime: "2026-10-10T12:00:00Z" },
             { bucketId: "gemini-5h", window: "5h", remainingFraction: 2, resetTime: "invalid" },
           ],
         },
@@ -279,6 +353,14 @@ describe("Antigravity subscription limits", () => {
           label: "Gemini · 5-hour",
           usedPercent: 0,
           windowDurationMins: 300,
+        },
+        {
+          id: "gemini-weekly",
+          kind: "weekly",
+          label: "Gemini · Weekly",
+          usedPercent: 100,
+          resetsAt: "2026-10-10T12:00:00.000Z",
+          windowDurationMins: 10080,
         },
       ]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

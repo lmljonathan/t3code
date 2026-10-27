@@ -7,6 +7,8 @@ import {
 } from "@t3tools/contracts";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -77,6 +79,7 @@ export interface AntigravityAdapterV2Options {
     cwd: string,
   ) => Effect.Effect<void>;
   readonly onSessionEvent?: AcpAdapterV2Flavor["onSessionEvent"];
+  readonly onTurnSettled?: AcpAdapterV2Flavor["onTurnSettled"];
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
 }
@@ -156,7 +159,42 @@ export function makeAntigravityAcpAdapterFlavor(
   return {
     driver: ANTIGRAVITY_PROVIDER,
     runtimeHarness: "Antigravity",
+    ...(options.onTurnSettled ? { onTurnSettled: options.onTurnSettled } : {}),
     capabilities: AntigravityProviderCapabilitiesV2,
+    assistantMessageFailure: (text, observedAt) => {
+      // Antigravity can acknowledge the prompt while returning this native quota banner as text.
+      const message = text.trim();
+      if (
+        !/^Usage Limit Reached\s+You have reached your current quota for this period\./i.test(
+          message,
+        )
+      )
+        return undefined;
+      const duration = message.match(/Your limit will reset in ([^.]+)\./i)?.[1];
+      const units = [...(duration ?? "").matchAll(/(\d+)\s*(days?|hours?|minutes?|seconds?)/gi)];
+      const seconds = units.reduce(
+        (total, [, amount, unit]) =>
+          total +
+          Number(amount) *
+            (unit!.toLowerCase().startsWith("day")
+              ? 86400
+              : unit!.toLowerCase().startsWith("hour")
+                ? 3600
+                : unit!.toLowerCase().startsWith("minute")
+                  ? 60
+                  : 1),
+        0,
+      );
+      return makeProviderFailure({
+        class: "usage_limit",
+        code: "antigravity_quota_exceeded",
+        message,
+        retryable: true,
+        ...(seconds > 0
+          ? { resetAt: DateTime.formatIso(DateTime.add(observedAt, { seconds })) }
+          : {}),
+      });
+    },
     makeRuntime,
     // Loading history replays every tool call; resume restores the session
     // without the replay and is what the official client does.

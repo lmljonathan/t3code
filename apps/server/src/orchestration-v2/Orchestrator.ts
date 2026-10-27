@@ -4832,6 +4832,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    if (command.providerFallbackOfRunId !== undefined) {
+      const source = projection.runs.find((run) => run.id === command.providerFallbackOfRunId);
+      if (
+        source?.status !== "failed" ||
+        latestExecutedRun(projection.runs)?.id !== source.id ||
+        latestRootProviderFailure(source, projection.turnItems)?.class !== "usage_limit" ||
+        command.dispatchMode.type !== "start_immediately" ||
+        command.modelSelection === undefined ||
+        command.modelSelection.instanceId === source.providerInstanceId ||
+        (yield* stopReachedRun(command, command.threadId, source.id)) ||
+        !modelSelectionsEqual(
+          { ...command.modelSelection, instanceId: source.modelSelection.instanceId },
+          source.modelSelection,
+        ) ||
+        !modelSelectionsEqual(projection.thread.modelSelection, source.modelSelection) ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.settledOverride === "settled" ||
+        projection.thread.snoozedUntil != null ||
+        projection.runtimeRequests.some((request) => request.status === "pending") ||
+        projection.runs.some((run) =>
+          ["queued", "preparing", "starting", "running", "waiting"].includes(run.status),
+        )
+      ) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: projection.thread,
+        });
+        return;
+      }
+    }
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
