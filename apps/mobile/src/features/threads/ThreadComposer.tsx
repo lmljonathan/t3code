@@ -54,10 +54,14 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import * as Haptics from "expo-haptics";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import {
   getComposerDraftSnapshot,
   composerDraftsAtom,
   setComposerDraftText,
+  setStickyComposerModelSelection,
   composerContextImportsAtom,
   countComposerDraftAttachmentsAfterSelection,
   useComposerDraft,
@@ -825,6 +829,31 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     quotaClock,
   ]);
 
+  const saveSettings = useAtomCommand(serverEnvironment.updateSettings, "default model update");
+  const handleSetDefaultModel = () => {
+    const environmentId = props.selectedThread.environmentId;
+    if (!environmentId || !currentModelSelection) return;
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setStickyComposerModelSelection(currentModelSelection);
+    void saveSettings({
+      environmentId,
+      input: {
+        patch: {
+          defaultModelSelection: currentModelSelection,
+          ...(props.selectedThread.projectId
+            ? {
+                projectSettingsOverrides: {
+                  [props.selectedThread.projectId]: {
+                    defaultModelSelection: currentModelSelection,
+                  },
+                },
+              }
+            : {}),
+        },
+      },
+    });
+  };
+
   const modelControl = (
     <View className="min-w-0 shrink">
       <ComposerModelControl
@@ -844,6 +873,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         prompt={draftMessage}
         surfaceColor={composerPanel}
         onPress={openSettings}
+        onLongPress={handleSetDefaultModel}
       />
     </View>
   );

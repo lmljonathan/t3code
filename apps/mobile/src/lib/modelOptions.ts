@@ -16,6 +16,7 @@ import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { providerQuotaSummary } from "@t3tools/shared/usageLimits";
 
 export type ModelOption = {
@@ -247,6 +248,9 @@ export function buildModelOptions(
   includeHidden = false,
   includeHiddenFallback = false,
 ): ReadonlyArray<ModelOption> {
+  const configuredDefaultModelSelection = config?.settings
+    ? resolveProjectSettings(config.settings, projectId).settings.defaultModelSelection
+    : null;
   const options = new Map<string, ModelOption>();
   const lockedProvider = config?.providers.find(
     (provider) => provider.instanceId === providerInstanceId,
@@ -348,7 +352,10 @@ export function buildModelOptions(
         ...(provider.iconUrl ? { providerIconUrl: provider.iconUrl } : {}),
         isHidden: !model.isCustom && hiddenModels.has(model.slug),
         canHide: !model.isCustom,
-        isDefault: model.isDefault === true,
+        isDefault: configuredDefaultModelSelection
+          ? configuredDefaultModelSelection.instanceId === provider.instanceId &&
+            configuredDefaultModelSelection.model === model.slug
+          : model.isDefault === true,
         isLegacy: model.isLegacy === true,
         ...(updateRequired ? { providerUpdateRequired: updateRequired } : {}),
         capabilities: model.capabilities,
@@ -419,7 +426,10 @@ export function buildModelOptions(
               }
             : undefined,
         ),
-        isDefault: false,
+        isDefault: configuredDefaultModelSelection
+          ? configuredDefaultModelSelection.instanceId === fallbackModelSelection.instanceId &&
+            configuredDefaultModelSelection.model === fallbackModelSelection.model
+          : false,
         isLegacy: model?.isLegacy === true,
         ...(config?.settings?.providerModelPreferences?.[
           fallbackModelSelection.instanceId

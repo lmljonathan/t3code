@@ -22,6 +22,8 @@ import {
   modelPreferencesMigrationPatch,
   resolveModelPreferences,
 } from "@t3tools/shared/serverSettings";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { setStickyComposerModelSelection } from "../../state/use-composer-drafts";
 import type {
   EnvironmentId,
   ModelSelection,
@@ -349,6 +351,7 @@ type ThreadSettingsSessionValue = {
   readonly isApplied: (option: ModelOption) => boolean;
   readonly isDisplayed: (option: ModelOption) => boolean;
   readonly pressModel: (option: ModelOption) => void;
+  readonly selectDefaultModel: (option: ModelOption) => void;
   readonly setProviderFilter: (providerKey: string | null) => void;
   readonly setSearchQuery: (query: string) => void;
   readonly setShowLegacy: (showLegacy: boolean) => void;
@@ -693,6 +696,61 @@ function ThreadSettingsSessionProvider(
     );
   };
 
+  const selectDefaultModel = async (pressed: ModelOption) => {
+    const option = catalogView === "models" ? automaticModel(pressed, false) : pressed;
+    if (!option) {
+      Dialog.alert(
+        "No quota available",
+        "No provider reports fresh, positive session and weekly quota for this model. Use Providers to choose an account manually.",
+      );
+      return;
+    }
+    if (!canCommitPendingModel(option, props.providerGroups)) {
+      Dialog.alert(
+        "Model unavailable",
+        "Set up this provider on web or desktop, or select another model.",
+      );
+      return;
+    }
+
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (isApplied(option) || option.key !== pendingModel?.key) {
+      setPendingPrompt(null);
+    }
+    setPendingModel(option);
+    props.onSelectModel(option);
+    setStickyComposerModelSelection(option.selection);
+
+    if (props.environmentId) {
+      const currentDefault = config?.settings
+        ? resolveProjectSettings(config.settings, props.projectId).settings.defaultModelSelection
+        : null;
+      const isAlreadyDefault =
+        currentDefault !== null &&
+        currentDefault.instanceId === option.selection.instanceId &&
+        currentDefault.model === option.selection.model;
+      const nextDefault = isAlreadyDefault ? null : option.selection;
+
+      await saveSettings({
+        environmentId: props.environmentId,
+        input: {
+          patch: {
+            defaultModelSelection: nextDefault,
+            ...(props.projectId
+              ? {
+                  projectSettingsOverrides: {
+                    [props.projectId]: {
+                      defaultModelSelection: nextDefault,
+                    },
+                  },
+                }
+              : {}),
+          },
+        },
+      });
+    }
+  };
+
   const modelCatalog =
     catalogView === "models"
       ? favoritesFirstBy(
@@ -761,6 +819,7 @@ function ThreadSettingsSessionProvider(
     isApplied,
     isDisplayed,
     pressModel,
+    selectDefaultModel,
     setProviderFilter,
     setSearchQuery,
     setShowLegacy: setShowLegacyToggle,
@@ -838,24 +897,34 @@ function ThreadSettingsModelListRow(props: {
 }) {
   const session = useThreadSettingsSession();
   const onPress = () => session.pressModel(props.option);
+  const onLongPress = () => session.selectDefaultModel(props.option);
   if (props.automatic) {
     const selected = session.displayedModelSelection?.model === props.option.selection.model;
     const candidates = props.candidateQuotas ?? [];
     const favoriteOptions = props.candidates ?? [props.option];
     const isFavorite = favoriteOptions.some((option) => session.favoriteKeys.has(option.key));
+    const isDefault =
+      props.option.isDefault || (props.candidates?.some((cand) => cand.isDefault) ?? false);
     const detail = props.option.isUnavailable
       ? "No provider with usable session and weekly quota"
       : `${props.option.providerLabel} · ${props.option.quotaSummary?.label ?? "Quota unavailable"}`;
-    const accessibilityLabel = [props.option.label, detail, props.resetAndWeeklyLabel]
+    const accessibilityLabel = [
+      props.option.label,
+      isDefault ? "Default" : null,
+      detail,
+      props.resetAndWeeklyLabel,
+    ]
       .filter(Boolean)
       .join(", ");
     return (
       <Pressable
         accessibilityRole="radio"
         accessibilityLabel={accessibilityLabel}
+        accessibilityHint="Double-tap to choose this model. Double-tap and hold to set as default for new chats."
         accessibilityState={{ checked: selected, disabled: props.option.isUnavailable }}
         disabled={props.option.isUnavailable}
         onPress={onPress}
+        onLongPress={onLongPress}
         className={cn(
           "mx-4 min-h-16 flex-row items-center gap-3 bg-grouped-card px-4 py-3 active:opacity-70",
           props.isFirst && "rounded-t-2xl",
@@ -863,9 +932,16 @@ function ThreadSettingsModelListRow(props: {
         )}
       >
         <View className="min-w-0 flex-1 gap-1">
-          <Text className="text-base font-t3-medium text-foreground" numberOfLines={2}>
-            {props.option.label}
-          </Text>
+          <View className="flex-row items-center gap-2">
+            <Text className="text-base font-t3-medium text-foreground" numberOfLines={2}>
+              {props.option.label}
+            </Text>
+            {isDefault ? (
+              <View className="rounded-md bg-primary/15 px-1.5 py-0.5">
+                <Text className="text-2xs font-t3-medium text-primary">Default</Text>
+              </View>
+            ) : null}
+          </View>
           {candidates.length > 0 ? (
             <View className="mt-0.5 h-1.5 w-full flex-row gap-1">
               {candidates.map((cand) => {
@@ -972,6 +1048,7 @@ function ThreadSettingsModelListRow(props: {
       isFirst={props.isFirst}
       isLast={props.isLast}
       onPress={onPress}
+      onLongPress={onLongPress}
       isFavorite={session.favoriteKeys.has(props.option.key)}
       favoritesLoaded={session.favoritesLoaded}
       onToggleFavorite={() => session.toggleFavorite([props.option])}
@@ -1124,10 +1201,13 @@ function ThreadSettingsReasoningSlider() {
     session.displayedModelSelection,
     session.reportedModelSelection,
   );
-  const index = Math.max(
-    0,
-    descriptor.options.findIndex((option) => option.id === current),
-  );
+  let index = 0;
+  for (let i = 0; i < descriptor.options.length; i++) {
+    if (descriptor.options[i]!.id === current) {
+      index = i;
+      break;
+    }
+  }
   return (
     <View className="mx-4 mt-3 rounded-2xl bg-grouped-card">
       <SliderRow

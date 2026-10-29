@@ -23,6 +23,7 @@ export function ComposerModelControl(props: {
   readonly quotaResetLabel?: string | null;
   readonly fallbackLabel?: string | null;
   readonly onPress: () => void;
+  readonly onLongPress?: () => void;
 }) {
   const descriptors = resolveProviderOptionDescriptors({
     capabilities: props.modelOption?.capabilities,
@@ -123,8 +124,14 @@ export function ComposerModelControl(props: {
           </Text>
         ) : undefined
       }
+      accessibilityHint={
+        props.onLongPress
+          ? "Double-tap to choose a model. Double-tap and hold to set as default for new chats."
+          : undefined
+      }
       maxWidth="100%"
       onPress={props.onPress}
+      onLongPress={props.onLongPress}
     />
   );
 }

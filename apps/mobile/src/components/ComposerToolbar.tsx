@@ -39,6 +39,7 @@ export function ComposerInlineControl(props: {
   readonly iconOnly?: boolean;
   readonly maxWidth?: ViewStyle["maxWidth"];
   readonly onPress?: () => void;
+  readonly onLongPress?: PressableProps["onLongPress"];
   readonly selected?: boolean;
   readonly static?: boolean;
   readonly chevronDirection?: "down" | "right";
@@ -83,6 +84,7 @@ export function ComposerInlineControl(props: {
         )}
         disabled={props.disabled || props.static}
         onPress={props.onPress}
+        onLongPress={props.onLongPress}
         style={{ opacity: props.disabled ? 0.45 : 1 }}
       >
         {icon}

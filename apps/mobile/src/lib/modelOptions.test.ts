@@ -571,6 +571,49 @@ describe("mobile model options", () => {
     ).toBeNull();
   });
 
+  it("marks the configured default model as default when settings specify defaultModelSelection", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          displayName: "Codex",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "model-a",
+              name: "Model A",
+              isDefault: true,
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "model-b",
+              name: "Model B",
+              isDefault: false,
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        },
+      ],
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "model-b",
+        },
+      },
+    } as unknown as ServerConfig;
+    const options = buildModelOptions(config, null, undefined, null);
+    const modelA = options.find((o) => o.selection.model === "model-a");
+    const modelB = options.find((o) => o.selection.model === "model-b");
+    expect(modelA?.isDefault).toBe(false);
+    expect(modelB?.isDefault).toBe(true);
+  });
+
   describe("project-aware enablement", () => {
     const projectId = ProjectId.make("project-a");
     const instanceId = ProviderInstanceId.make("codex_work");

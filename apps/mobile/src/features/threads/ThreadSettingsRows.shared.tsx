@@ -9,6 +9,7 @@ export type ModelRowProps = {
   readonly option: ModelOption;
   readonly selected: boolean;
   readonly onPress: () => void;
+  readonly onLongPress?: () => void;
   readonly isFavorite: boolean;
   readonly favoritesLoaded: boolean;
   readonly onToggleFavorite: () => void;
@@ -65,8 +66,10 @@ export function ModelRowContent(
           disabled: props.option.isUnavailable === true || props.option.isHidden === true,
         }}
         className="min-h-11 min-w-0 flex-1 flex-row items-center gap-2 active:opacity-70"
+        accessibilityHint="Double-tap to choose this model. Double-tap and hold to set as default for new chats."
         disabled={props.option.isUnavailable || props.option.isHidden}
         onPress={props.onPress}
+        onLongPress={props.onLongPress}
       >
         {props.leadingSelection}
         <View className="min-w-0 flex-1 gap-1 py-2">
