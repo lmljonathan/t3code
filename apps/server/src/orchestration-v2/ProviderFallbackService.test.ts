@@ -9,6 +9,8 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  DEFAULT_SERVER_SETTINGS,
+  CommandId,
   type ModelSelection,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2DomainEvent,
@@ -24,6 +26,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderFallbackService from "./ProviderFallbackService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -87,8 +90,8 @@ const fixture = Effect.fn(function* () {
     activeAttemptId: null,
     status: "failed",
     requestedAt: now,
-    startedAt: now,
-    completedAt: now,
+    startedAt: DateTime.subtract(now, { hours: 1 }),
+    completedAt: DateTime.subtract(now, { hours: 1 }),
     checkpointId: null,
     contextHandoffId: null,
   };
@@ -133,10 +136,48 @@ const fixture = Effect.fn(function* () {
   return { projection, event, run, now };
 });
 
+type Fixture = Effect.Success<ReturnType<typeof fixture>>;
+
+function withFailureReset(data: Fixture, resetAt: DateTime.Utc): Fixture {
+  const resetIso = DateTime.formatIso(resetAt);
+  return {
+    ...data,
+    projection: {
+      ...data.projection,
+      turnItems: data.projection.turnItems.map((item) =>
+        item.type === "error" ? { ...item, failure: { ...item.failure, resetAt: resetIso } } : item,
+      ),
+    },
+  };
+}
+
+function withArmedRecovery(data: Fixture): Fixture {
+  const failure = data.projection.turnItems.find((item) => item.type === "error");
+  const resetAt =
+    failure !== undefined && failure.type === "error" ? (failure.failure.resetAt ?? null) : null;
+  return {
+    ...data,
+    projection: {
+      ...data.projection,
+      thread: {
+        ...data.projection.thread,
+        limitRecovery: {
+          runId: data.run.id,
+          resetAt: resetAt!,
+          autoResume: true,
+          snooze: false,
+          requestId: CommandId.make("limit-arm:test"),
+        },
+      } as OrchestrationV2ThreadProjection["thread"],
+    },
+  };
+}
+
 const exercise = Effect.fn(function* (
-  data: Effect.Success<ReturnType<typeof fixture>>,
+  data: Fixture,
   instances: ReadonlyArray<ProviderInstance> = [instance(primary), instance(backup)],
   disabled: ReadonlyArray<ProviderInstanceId> = [],
+  settings: { readonly autoResume?: boolean } = {},
 ) {
   const commands: OrchestrationV2ServerCommand[] = [];
   const deps = Layer.mergeAll(
@@ -153,6 +194,13 @@ const exercise = Effect.fn(function* (
         }),
     }),
     Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeed(Option.none()) }),
+    Layer.mock(ServerSettings.ServerSettingsService)({
+      start: Effect.void,
+      getSettings: Effect.succeed({
+        ...DEFAULT_SERVER_SETTINGS,
+        autoResumeLimitedThreads: settings.autoResume ?? true,
+      }),
+    }),
     Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
       getInstance: (id) => Effect.succeed(instances.find((instance) => instance.instanceId === id)),
       listInstances: Effect.succeed(instances),
@@ -327,7 +375,11 @@ describe("exact-model provider fallback", () => {
             runId: data.run.id,
           } as OrchestrationV2ThreadProjection["turnItems"][number],
         ];
-      if (state === "snoozed") projection.thread = { ...projection.thread, snoozedUntil: data.now };
+      if (state === "snoozed")
+        projection.thread = {
+          ...projection.thread,
+          snoozedUntil: DateTime.add(data.now, { hours: 1 }),
+        };
       if (state === "changed-model")
         projection.thread = {
           ...projection.thread,
@@ -455,12 +507,12 @@ describe("exact-model provider fallback", () => {
     }),
   );
 
-  it.effect("arms thread with earliest reset when all candidates are exhausted", () =>
+  it.effect("arms at the failed run's own reset, not another account's earlier reset", () =>
     Effect.gen(function* () {
-      const data = yield* fixture();
+      const failureReset = DateTime.add(yield* DateTime.now, { hours: 2 });
+      const data = withFailureReset(yield* fixture(), failureReset);
       const nowIso = DateTime.formatIso(data.now);
       const backupReset = DateTime.add(data.now, { minutes: 30 });
-      const thirdReset = DateTime.add(data.now, { hours: 2 });
       const backupExhausted = instance(backup, {
         usageLimits: {
           checkedAt: nowIso,
@@ -484,7 +536,7 @@ describe("exact-model provider fallback", () => {
               kind: "session",
               label: "Session",
               usedPercent: 100,
-              resetsAt: DateTime.formatIso(thirdReset),
+              resetsAt: DateTime.formatIso(DateTime.add(data.now, { hours: 5 })),
             },
           ],
         },
@@ -494,8 +546,67 @@ describe("exact-model provider fallback", () => {
       const command = commands[0];
       assert.equal(command?.type, "thread.metadata.update");
       if (command?.type !== "thread.metadata.update") return;
-      assert.equal(command.limitRecovery?.resetAt, DateTime.formatIso(backupReset));
+      assert.equal(command.limitRecovery?.resetAt, DateTime.formatIso(failureReset));
+      assert.equal(command.limitRecovery?.runId, data.run.id);
       assert.isTrue(command.limitRecovery?.autoResume);
+    }),
+  );
+
+  it.effect("does not fall back when auto-resume is disabled", () =>
+    Effect.gen(function* () {
+      const commands = yield* exercise(yield* fixture(), undefined, [], { autoResume: false });
+      assert.isEmpty(commands);
+    }),
+  );
+
+  it.effect("does not auto-resume a run the user cancelled", () =>
+    Effect.gen(function* () {
+      const data = withFailureReset(
+        yield* fixture(),
+        DateTime.add(yield* DateTime.now, { hours: 2 }),
+      );
+      const cancelled = {
+        ...data,
+        projection: {
+          ...data.projection,
+          thread: {
+            ...data.projection.thread,
+            limitRecovery: {
+              runId: data.run.id,
+              resetAt: DateTime.formatIso(DateTime.add(data.now, { hours: 2 })),
+              autoResume: false,
+              snooze: false,
+            },
+          } as OrchestrationV2ThreadProjection["thread"],
+        },
+      };
+      assert.isEmpty(yield* exercise(cancelled));
+    }),
+  );
+
+  it.effect("ignores a snooze that already expired", () =>
+    Effect.gen(function* () {
+      const data = withFailureReset(
+        yield* fixture(),
+        DateTime.add(yield* DateTime.now, { hours: 2 }),
+      );
+      const woke = {
+        ...data,
+        projection: {
+          ...data.projection,
+          thread: {
+            ...data.projection.thread,
+            snoozedUntil: DateTime.subtract(data.now, { minutes: 1 }),
+          },
+        },
+      };
+      const commands = yield* exercise(woke, [instance(primary), instance(backup)]);
+      assert.lengthOf(commands, 1);
+      assert.equal(commands[0]?.type, "message.dispatch");
+      assert.equal(
+        commands[0]?.type === "message.dispatch" && commands[0].modelSelection?.instanceId,
+        backup,
+      );
     }),
   );
 
@@ -544,13 +655,41 @@ describe("exact-model provider fallback", () => {
     }),
   );
 
-  it.effect("resumes with primary provider via continuation when primary resets first", () =>
+  it.effect("arms instead of continuing on the primary before its recovery is armed", () =>
     Effect.gen(function* () {
-      const data = yield* fixture();
-      const nowIso = DateTime.formatIso(data.now);
-      const primaryReset = instance(primary, {
+      const failureReset = DateTime.add(yield* DateTime.now, { hours: 3 });
+      const data = withFailureReset(yield* fixture(), failureReset);
+      const primaryReplenished = instance(primary, {
         usageLimits: {
-          checkedAt: nowIso,
+          checkedAt: DateTime.formatIso(data.now),
+          windows: [
+            {
+              id: "primary",
+              kind: "session",
+              label: "Session",
+              usedPercent: 20,
+              resetsAt: DateTime.formatIso(DateTime.subtract(data.now, { minutes: 5 })),
+            },
+          ],
+        },
+      });
+      const commands = yield* exercise(data, [primaryReplenished]);
+      assert.lengthOf(commands, 1);
+      const command = commands[0];
+      assert.equal(command?.type, "thread.metadata.update");
+      if (command?.type !== "thread.metadata.update") return;
+      assert.equal(command.limitRecovery?.resetAt, DateTime.formatIso(failureReset));
+    }),
+  );
+
+  it.effect("continues on the primary once its armed recovery reset has arrived", () =>
+    Effect.gen(function* () {
+      const data = withArmedRecovery(
+        withFailureReset(yield* fixture(), DateTime.subtract(yield* DateTime.now, { minutes: 5 })),
+      );
+      const primaryReplenished = instance(primary, {
+        usageLimits: {
+          checkedAt: DateTime.formatIso(data.now),
           windows: [
             {
               id: "primary",
@@ -564,7 +703,7 @@ describe("exact-model provider fallback", () => {
       });
       const backupExhausted = instance(backup, {
         usageLimits: {
-          checkedAt: nowIso,
+          checkedAt: DateTime.formatIso(data.now),
           windows: [
             {
               id: "primary",
@@ -576,12 +715,13 @@ describe("exact-model provider fallback", () => {
           ],
         },
       });
-      const commands = yield* exercise(data, [primaryReset, backupExhausted]);
+      const commands = yield* exercise(data, [primaryReplenished, backupExhausted]);
       assert.lengthOf(commands, 1);
       const command = commands[0];
       assert.equal(command?.type, "message.dispatch");
       if (command?.type !== "message.dispatch") return;
       assert.equal(command.usageLimitContinuationOfRunId, data.run.id);
+      assert.equal(command.usageLimitRecoveryRequestId, "limit-arm:test");
       assert.isUndefined(command.modelSelection);
       assert.equal(command.text, "Continue where you left off.");
     }),

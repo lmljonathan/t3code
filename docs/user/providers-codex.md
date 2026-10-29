@@ -31,12 +31,12 @@ Add another ChatGPT account in **Settings → Providers**, then select the accou
 from the thread's model picker. Compatible accounts can continue the same thread.
 Connecting accounts through T3 Code leaves your CLI login unchanged.
 
-When an account reaches its usage limit, T3 Code automatically continues on another
-enabled Codex instance offering the exact same model and selected options. Instances
-disabled for the project are excluded. Each instance is tried once per fallback
-chain; if none qualify, the thread stays paused with its usage-limit error. The
-continuation appears in the thread history. Stopping or snoozing the thread prevents
-automatic fallback.
+When an account reaches its usage limit and **Auto-resume limited threads** is enabled,
+T3 Code automatically continues on another enabled Codex instance offering the exact same
+model and selected options. Instances disabled for the project are excluded. Each instance
+is tried once per fallback chain; if none qualify, the thread stays paused with its
+usage-limit error. The continuation appears in the thread history. Stopping the thread,
+snoozing it, or cancelling its scheduled continuation prevents automatic fallback.
 
 ### Multiple CLI logins
 

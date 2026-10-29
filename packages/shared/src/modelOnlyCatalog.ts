@@ -78,7 +78,7 @@ function quotaScore<T extends ModelCandidate>(
   return { session, weekly: longTerm };
 }
 
-export function candidateRemainingPercent<T extends ModelCandidate>(
+function candidateRemainingPercent<T extends ModelCandidate>(
   option: T,
   providers: ReadonlyArray<ServerProvider>,
   now: number,
@@ -117,7 +117,7 @@ export function candidateRemainingPercent<T extends ModelCandidate>(
   return null;
 }
 
-export function formatCandidateShortLabel(providerLabel: string): string {
+function formatCandidateShortLabel(providerLabel: string): string {
   if (providerLabel.startsWith("Antigravity ")) {
     return providerLabel.slice("Antigravity ".length);
   }
@@ -133,7 +133,7 @@ export interface ModelCandidateQuota<T extends ModelCandidate = ModelCandidate> 
   readonly shortLabel: string;
 }
 
-export function evaluateCandidateQuota<T extends ModelCandidate>(
+function evaluateCandidateQuota<T extends ModelCandidate>(
   option: T,
   providers: ReadonlyArray<ServerProvider>,
   now: number,
@@ -164,7 +164,7 @@ export function evaluateCandidateQuota<T extends ModelCandidate>(
   };
 }
 
-export function modelResetAndWeekly<T extends ModelCandidate>(
+function modelResetAndWeekly<T extends ModelCandidate>(
   candidates: ReadonlyArray<T>,
   providers: ReadonlyArray<ServerProvider>,
   now: number,

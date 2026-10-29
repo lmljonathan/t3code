@@ -1368,135 +1368,154 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect.each(["continue", "stopped", "changed-model", "changed-options"] as const)(
-  "provider fallback atomically handles %s",
-  (scenario) =>
-    Effect.gen(function* () {
-      const engine = yield* Orchestrator.OrchestratorV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const sink = yield* EventSink.EventSinkV2;
-      const threadId = ThreadId.make(`thread:fallback:${scenario}`);
-      const backup = ProviderInstanceId.make("codex-backup");
-      const now = yield* DateTime.now;
+it.effect.each([
+  "continue",
+  "stopped",
+  "changed-model",
+  "changed-options",
+  "expired-snooze",
+] as const)("provider fallback atomically handles %s", (scenario) =>
+  Effect.gen(function* () {
+    const engine = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make(`thread:fallback:${scenario}`);
+    const backup = ProviderInstanceId.make("codex-backup");
+    const now = yield* DateTime.now;
+    yield* engine.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("fallback:create"),
+      threadId,
+      projectId: ProjectId.make("fallback-project"),
+      title: "Fallback",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: "/repo",
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* engine.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("fallback:start"),
+      threadId,
+      messageId: MessageId.make("fallback:user"),
+      text: "Continue work",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const original = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("fallback:failed"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...original, status: "failed", startedAt: now, completedAt: now },
+        },
+        {
+          id: EventId.make("fallback:error"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("fallback:error"),
+            type: "error",
+            threadId,
+            runId: original.id,
+            nodeId: original.rootNodeId,
+            providerThreadId: original.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "failed",
+            title: "Quota",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: {
+              class: "usage_limit",
+              message: "Quota exceeded",
+              code: null,
+              retryable: null,
+            },
+          },
+        },
+      ],
+    });
+    if (scenario === "stopped")
       yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("fallback:create"),
+        type: "thread.stop",
+        commandId: CommandId.make("fallback:stop"),
         threadId,
-        projectId: ProjectId.make("fallback-project"),
-        title: "Fallback",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: "/repo",
-        createdBy: "user",
-        creationSource: "web",
       });
+    if (scenario === "changed-model")
       yield* engine.dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make("fallback:start"),
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("fallback:change"),
         threadId,
-        messageId: MessageId.make("fallback:user"),
-        text: "Continue work",
-        attachments: [],
-        dispatchMode: { type: "start_immediately" },
-        createdBy: "user",
-        creationSource: "web",
+        modelSelection: { ...modelSelection, model: "another-model" },
       });
-      const original = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+    if (scenario === "expired-snooze") {
+      const thread = (yield* projections.getThreadProjection(threadId)).thread;
       yield* sink.write({
         events: [
           {
-            id: EventId.make("fallback:failed"),
-            type: "run.updated",
+            id: EventId.make("fallback:expired-snooze"),
+            type: "thread.metadata-updated",
             threadId,
             occurredAt: now,
-            payload: { ...original, status: "failed", startedAt: now, completedAt: now },
-          },
-          {
-            id: EventId.make("fallback:error"),
-            type: "turn-item.updated",
-            threadId,
-            occurredAt: now,
-            payload: {
-              id: TurnItemId.make("fallback:error"),
-              type: "error",
-              threadId,
-              runId: original.id,
-              nodeId: original.rootNodeId,
-              providerThreadId: original.providerThreadId,
-              providerTurnId: null,
-              nativeItemRef: null,
-              parentItemId: null,
-              ordinal: 1,
-              status: "failed",
-              title: "Quota",
-              startedAt: now,
-              completedAt: now,
-              updatedAt: now,
-              failure: {
-                class: "usage_limit",
-                message: "Quota exceeded",
-                code: null,
-                retryable: null,
-              },
-            },
+            payload: { ...thread, snoozedUntil: DateTime.subtract(now, { hours: 1 }) },
           },
         ],
       });
-      if (scenario === "stopped")
-        yield* engine.dispatch({
-          type: "thread.stop",
-          commandId: CommandId.make("fallback:stop"),
-          threadId,
-        });
-      if (scenario === "changed-model")
-        yield* engine.dispatch({
-          type: "thread.model-selection.set",
-          commandId: CommandId.make("fallback:change"),
-          threadId,
-          modelSelection: { ...modelSelection, model: "another-model" },
-        });
-      const command = {
-        type: "message.dispatch" as const,
-        commandId: CommandId.make("fallback:continue"),
-        threadId,
-        messageId: MessageId.make(`message:provider-fallback:${original.id}`),
-        providerFallbackOfRunId: original.id,
-        modelSelection: {
-          ...modelSelection,
-          instanceId: backup,
-          ...(scenario === "changed-options" ? { options: [{ id: "effort", value: "low" }] } : {}),
-        },
-        text: "Continue where you left off",
-        attachments: [],
-        dispatchMode: { type: "start_immediately" as const },
-        createdBy: "agent" as const,
-        creationSource: "server" as const,
-      };
-      yield* engine.dispatch(command);
-      yield* engine.dispatch(command);
-      const result = yield* projections.getThreadProjection(threadId);
-      assert.lengthOf(result.runs, scenario === "continue" ? 2 : 1);
-      if (scenario === "continue") {
-        assert.equal(result.thread.modelSelection.instanceId, backup);
-        assert.equal(result.thread.modelSelection.model, modelSelection.model);
-        assert.equal(result.runs[1]?.userMessageId, command.messageId);
-        assert.isNotNull(result.runs[1]?.contextHandoffId);
-      }
-    }).pipe(
-      Effect.provide(
-        Layer.merge(
-          ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
-          ProviderReplayHarness.layerWithRegistry(
-            { name: `fallback-${scenario}` },
-            ProviderAdapterRegistry.layerFromAdapters([
-              adapter,
-              { ...adapter, instanceId: ProviderInstanceId.make("codex-backup") },
-            ]),
-            { databaseLayer: layerDatabase, runEffectWorker: false },
-          ),
+    }
+    const command = {
+      type: "message.dispatch" as const,
+      commandId: CommandId.make("fallback:continue"),
+      threadId,
+      messageId: MessageId.make(`message:provider-fallback:${original.id}`),
+      providerFallbackOfRunId: original.id,
+      modelSelection: {
+        ...modelSelection,
+        instanceId: backup,
+        ...(scenario === "changed-options" ? { options: [{ id: "effort", value: "low" }] } : {}),
+      },
+      text: "Continue where you left off",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" as const },
+      createdBy: "agent" as const,
+      creationSource: "server" as const,
+    };
+    yield* engine.dispatch(command);
+    yield* engine.dispatch(command);
+    const result = yield* projections.getThreadProjection(threadId);
+    const continued = scenario === "continue" || scenario === "expired-snooze";
+    assert.lengthOf(result.runs, continued ? 2 : 1);
+    if (continued) {
+      assert.equal(result.thread.modelSelection.instanceId, backup);
+      assert.equal(result.thread.modelSelection.model, modelSelection.model);
+      assert.equal(result.runs[1]?.userMessageId, command.messageId);
+      assert.isNotNull(result.runs[1]?.contextHandoffId);
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.merge(
+        ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+        ProviderReplayHarness.layerWithRegistry(
+          { name: `fallback-${scenario}` },
+          ProviderAdapterRegistry.layerFromAdapters([
+            adapter,
+            { ...adapter, instanceId: ProviderInstanceId.make("codex-backup") },
+          ]),
+          { databaseLayer: layerDatabase, runEffectWorker: false },
         ),
       ),
     ),
+  ),
 );

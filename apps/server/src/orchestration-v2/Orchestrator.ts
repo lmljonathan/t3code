@@ -4834,6 +4834,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.providerFallbackOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.providerFallbackOfRunId);
+      const fallbackNow = yield* DateTime.now;
       if (
         source?.status !== "failed" ||
         latestExecutedRun(projection.runs)?.id !== source.id ||
@@ -4850,7 +4851,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.settledOverride === "settled" ||
-        projection.thread.snoozedUntil != null ||
+        (projection.thread.snoozedUntil != null &&
+          DateTime.toEpochMillis(projection.thread.snoozedUntil) >
+            DateTime.toEpochMillis(fallbackNow)) ||
         projection.runtimeRequests.some((request) => request.status === "pending") ||
         projection.runs.some((run) =>
           ["queued", "preparing", "starting", "running", "waiting"].includes(run.status),
@@ -4862,7 +4865,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         )({
           type: "thread.metadata-updated",
           threadId: command.threadId,
-          occurredAt: yield* DateTime.now,
+          occurredAt: fallbackNow,
           payload: projection.thread,
         });
         return;
